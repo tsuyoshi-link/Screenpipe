@@ -1,0 +1,18 @@
+{
+    "bundle": {
+        "macOS": {
+            "entitlements": "entitlements.plist",
+            "hardenedRuntime": true,
+            "exceptionDomain": "screenpi.pe",
+            "provisioningProfile": null,
+            "dmg": {
+                "background": "assets/dmg-background.png"
+            }
+        },
+        "externalBin": [
+            "bun",
+            "ffmpeg",
+            "ffprobe"
+        ]
+    }
+}

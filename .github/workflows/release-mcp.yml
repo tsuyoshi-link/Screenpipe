@@ -1,0 +1,60 @@
+name: Release MCP
+
+on:
+  push:
+    tags:
+      - "mcp-v*"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        working-directory: crates/screenpipe-integrations/screenpipe-mcp
+        run: npm install
+
+      - name: Build
+        working-directory: crates/screenpipe-integrations/screenpipe-mcp
+        run: npm run build
+
+      - name: Publish to npm
+        working-directory: crates/screenpipe-integrations/screenpipe-mcp
+        run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+
+      - name: Install mcpb CLI
+        run: npm install -g @anthropic-ai/mcpb
+
+      - name: Build mcpb bundle
+        working-directory: crates/screenpipe-integrations/screenpipe-mcp
+        run: mcpb pack
+
+      - name: Get version from tag
+        id: version
+        run: echo "VERSION=${GITHUB_REF#refs/tags/}" >> $GITHUB_OUTPUT
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release create ${{ steps.version.outputs.VERSION }} \
+            --title "MCP Server ${{ steps.version.outputs.VERSION }}" \
+            --generate-notes \
+            --prerelease \
+            crates/screenpipe-integrations/screenpipe-mcp/screenpipe-mcp.mcpb \
+            || gh release upload ${{ steps.version.outputs.VERSION }} \
+            crates/screenpipe-integrations/screenpipe-mcp/screenpipe-mcp.mcpb --clobber

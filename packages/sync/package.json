@@ -1,0 +1,34 @@
+{
+  "name": "@screenpipe/sync",
+  "version": "0.5.0",
+  "description": "Sync Screenpipe activity to structured daily summaries. Uses Claude Code CLI for AI extraction.",
+  "type": "module",
+  "bin": {
+    "screenpipe-sync": "dist/index.js"
+  },
+  "scripts": {
+    "build": "bun build src/index.ts --outdir dist --target node",
+    "dev": "bun run src/index.ts",
+    "prepublishOnly": "bun run build"
+  },
+  "keywords": [
+    "screenpipe",
+    "productivity",
+    "ai",
+    "screen-recording",
+    "daily-summary",
+    "claude-code",
+    "context-sync"
+  ],
+  "author": "Louis Beaumont <louis@screenpi.pe>",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/screenpipe/screenpipe",
+    "directory": "packages/sync"
+  },
+  "devDependencies": {
+    "@types/bun": "latest",
+    "typescript": "^5.0.0"
+  }
+}

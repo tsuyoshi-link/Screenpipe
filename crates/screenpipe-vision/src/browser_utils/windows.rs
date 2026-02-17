@@ -1,0 +1,99 @@
+use anyhow::{anyhow, Result};
+use reqwest::blocking::Client;
+use reqwest::Error;
+use tracing::{debug, error};
+use uiautomation::types::UIProperty::ProcessId;
+use uiautomation::types::{TreeScope, UIProperty};
+use uiautomation::variants::Variant;
+use uiautomation::{controls::ControlType, UIAutomation};
+
+use super::BrowserUrlDetector;
+
+pub struct WindowsUrlDetector;
+
+impl WindowsUrlDetector {
+    pub fn new() -> Self {
+        Self
+    }
+
+    fn validate_url(url: &str) -> Result<bool, Error> {
+        let client = Client::new();
+        let response = client.get(url).send();
+        match response {
+            Ok(_) => Ok(true),
+            Err(_) => Ok(false),
+        }
+    }
+
+    fn get_active_url_from_window(pid: i32) -> Result<Option<String>> {
+        let automation = UIAutomation::new().map_err(|e| {
+            anyhow!(
+                "Failed to create UIAutomation (COM thread mode conflict?): {}",
+                e
+            )
+        })?;
+        let root_ele = automation
+            .get_root_element()
+            .map_err(|e| anyhow!("Failed to get root element: {}", e))?;
+        let condition = automation
+            .create_property_condition(ProcessId, Variant::from(pid as i32), None)
+            .map_err(|e| anyhow!("Failed to create property condition: {}", e))?;
+
+        match root_ele.find_first(TreeScope::Subtree, &condition) {
+            Ok(ele) => {
+                let control_condition = automation
+                    .create_property_condition(
+                        UIProperty::ControlType,
+                        Variant::from(ControlType::Edit as i32),
+                        None,
+                    )
+                    .map_err(|e| anyhow!("Failed to create control condition: {}", e))?;
+
+                if let Ok(address_bar) = ele.find_first(TreeScope::Subtree, &control_condition) {
+                    debug!("address bar: {:?}", address_bar);
+                    if let Ok(value) = address_bar.get_property_value(UIProperty::ValueValue) {
+                        if let Ok(url) = value.get_string() {
+                            if !url.is_empty() {
+                                debug!("found url: {}", url);
+                                if !url.starts_with("http://") && !url.starts_with("https://") {
+                                    let full_url = format!("https://{}", url);
+                                    debug!("reconstructed url: {}", full_url);
+                                    if Self::validate_url(&full_url).unwrap_or(false) {
+                                        debug!("validated url: {}", full_url);
+                                        return Ok(Some(full_url));
+                                    } else {
+                                        debug!("invalid url, might be some search text: {}", url);
+                                    }
+                                } else {
+                                    if Self::validate_url(&url).unwrap_or(false) {
+                                        debug!("validated url: {}", url);
+                                        return Ok(Some(url));
+                                    } else {
+                                        debug!("invalid url, might be some search text: {}", url);
+                                    }
+                                    return Ok(Some(url));
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                error!("failed to find edit bar: {}", e);
+                return Err(anyhow!("failed to find edit bar: {}", e));
+            }
+        }
+        Ok(None)
+    }
+}
+
+impl BrowserUrlDetector for WindowsUrlDetector {
+    fn get_active_url(
+        &self,
+        _app_name: &str,
+        process_id: i32,
+        _window_title: &str,
+    ) -> Result<Option<String>> {
+        return Self::get_active_url_from_window(process_id);
+    }
+}

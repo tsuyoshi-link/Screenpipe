@@ -1,0 +1,190 @@
+# testing locally with act cli
+
+# act -W .github/workflows/ci.yml --container-architecture linux/amd64 -env ACTIONS_RUNTIME_URL=http://host.docker.internal:8080/ --env ACTIONS_RUNTIME_TOKEN=foo --env ACTIONS_CACHE_URL=http://host.docker.internal:8080/ --artifact-server-path out -j build-ubuntu -P ubuntu-latest=-self-hosted --env-file .env --secret-file .secrets
+
+name: Rust CI
+
+on:
+  push:
+    paths:
+      - '**.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - '.github/workflows/ci.yml'
+      - '.github/scripts/**'
+  pull_request:
+    paths:
+      - '**.rs'
+      - '**/Cargo.toml'
+      - '**/Cargo.lock'
+      - '.github/workflows/ci.yml'
+      - '.github/scripts/**'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test-ubuntu:
+    runs-on: ubuntu-latest
+    env:
+      RUSTFLAGS: "-C link-arg=-Wl,--allow-multiple-definition"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/bin/
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          cache: true
+          rustflags: ""
+
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.2
+
+      - name: Install dependencies
+        run: .github/scripts/install_dependencies.sh
+
+      - name: Copy test image
+        run: |
+          mkdir -p target/debug/deps
+          cp crates/screenpipe-vision/tests/testing_OCR.png target/debug/deps/
+
+      - name: Run cargo tests
+        run: cargo test
+
+      # todo: need to run backend ...
+      # - name: Run bun tests
+      #   run: bun test
+      #   working-directory: ./packages/screenpipe-js
+
+  test-windows:
+    runs-on: windows-2019
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\cargo\
+            target\
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: Install Rust
+        run: |
+          Invoke-WebRequest https://static.rust-lang.org/rustup/dist/x86_64-pc-windows-gnu/rustup-init.exe -OutFile rustup-init.exe
+          .\rustup-init.exe -y
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          cache: true
+          rustflags: ""
+
+      - name: setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.2
+
+      - name: Install vcpkg
+        uses: lukka/run-vcpkg@v11
+        with:
+          vcpkgGitCommitId: "2a3138723698306f4261632c92dc782f586167e3"
+
+      - name: Set up MSVC
+        uses: ilammy/msvc-dev-cmd@v1
+
+      - name: Install LLVM and Clang
+        uses: KyleMayes/install-llvm-action@v2
+        with:
+          version: "10.0"
+
+      - name: Run pre_build.js
+        shell: bash
+        run: bun ./scripts/pre_build.js
+        working-directory: ./apps/screenpipe-app-tauri
+
+      - name: Copy test image
+        shell: bash
+        run: |
+          mkdir -p target/debug/deps || true
+          cp crates/screenpipe-vision/tests/testing_OCR.png target/debug/deps/
+
+      - name: Run specific Windows OCR cargo test
+        run: cargo test test_process_ocr_task_windows --release
+
+      - name: Run PII removal tests
+        run: cargo test -p screenpipe-core pii_removal --release
+
+      - name: Run PII redaction tests
+        run: cargo test -p screenpipe-server --lib pii_redaction_tests --release
+
+      # pipes_test removed — pipe manager system deleted in #2212
+
+  test-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/cache@v4
+        with:
+          path: |
+            ~\AppData\Local\cargo\
+            target\
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          override: true
+          cache: true
+          rustflags: ""
+
+      - name: setup Bun
+        uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.2.2
+
+      - name: Run pre_build.js
+        shell: bash
+        env:
+          SKIP_SCREENPIPE_SETUP: true # avoid trying to copy screenpipe binaries, not yet built (next step)
+        run: bun ./scripts/pre_build.js
+        working-directory: ./apps/screenpipe-app-tauri
+
+      - name: Copy test image
+        shell: bash
+        run: |
+          mkdir -p target/debug/deps || true
+          cp crates/screenpipe-vision/tests/testing_OCR.png target/debug/deps/
+
+      - name: Run specific Apple OCR cargo test
+        shell: bash
+        env:
+          DYLD_LIBRARY_PATH: /Users/runner/work/screenpipe/screenpipe/crates/screenpipe-vision/lib
+        # Only test vision package to avoid whisper-rs build issues on macOS CI
+        run: cargo test -p screenpipe-vision test_apple_native_ocr
+
+      - name: Run PII removal tests
+        run: cargo test -p screenpipe-core pii_removal
+
+      # PII redaction tests skipped on macOS due to whisper-rs build issues
+      # - name: Run PII redaction tests
+      #   run: cargo test -p screenpipe-server --lib pii_redaction_tests

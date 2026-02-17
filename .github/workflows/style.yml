@@ -1,0 +1,65 @@
+name: Code Quality & Optimization
+
+on: [push, pull_request]
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  lint:
+    name: Clippy & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install dependencies
+        run: .github/scripts/install_dependencies.sh
+
+      - name: Set up Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: stable
+          components: clippy, rustfmt
+          rustflags: ""
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run Clippy
+        run: |
+          # Skip packages with macOS-specific Objective-C code that won't compile on Linux
+          cargo clippy --workspace \
+            --exclude screenpipe-vision \
+            --exclude screenpipe-audio \
+            --all-targets -- -W clippy::all
+
+  optimize:
+    name: Dependency & Performance Checks
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check for unused dependencies
+        uses: bnjbvr/cargo-machete@main
+
+      - name: Install dependencies
+        run: .github/scripts/install_dependencies.sh
+
+      - name: Install cargo-audit
+        run: cargo install cargo-audit
+
+      - name: Security audit
+        continue-on-error: true
+        run: cargo audit
+
+      - name: Install cargo-deny
+        run: cargo install cargo-deny
+
+      - name: Check duplicate dependencies
+        continue-on-error: true
+        run: cargo deny check bans
