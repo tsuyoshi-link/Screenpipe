@@ -1,3 +1,5 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpi.pe
 import { $ } from 'bun'
 import fs from 'fs/promises'
 import os from 'os'
@@ -60,6 +62,8 @@ async function findWget() {
 	const possiblePaths = [
 		'C:\\ProgramData\\chocolatey\\bin\\wget.exe',
 		'C:\\Program Files\\Git\\mingw64\\bin\\wget.exe',
+		'C:\\Program Files (x86)\\GnuWin32\\bin\\wget.exe',
+		'C:\\Users\\TTT\\AppData\\Local\\Microsoft\\WinGet\\Packages\\JernejSimoncic.Wget_Microsoft.Winget.Source_8wekyb3d8bbwe\\wget.exe',
 		'C:\\msys64\\usr\\bin\\wget.exe',
 		'C:\\Windows\\System32\\wget.exe',
 		'C:\\wget\\wget.exe',

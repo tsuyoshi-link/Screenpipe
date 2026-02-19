@@ -1,3 +1,5 @@
+// screenpipe — AI that knows everything you've seen, said, or heard
+// https://screenpi.pe
 #[cfg(target_os = "windows")]
 use std::{env, fs};
 use std::{
@@ -84,10 +86,23 @@ fn install_onnxruntime() {
     use reqwest::blocking::Client;
     use std::time::Duration;
     use std::{path::Path, process::Command};
-    // Set static CRT for Windows MSVC target
-    if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() == "msvc" {
+    // Opt-in static CRT for knf-rs on Windows. Default to dynamic CRT to avoid
+    // runtime-library mismatches with other native deps in local builds.
+    if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() == "msvc"
+        && env::var("SCREENPIPE_KNF_STATIC_CRT").ok().as_deref() == Some("1")
+    {
         println!("cargo:rustc-env=KNF_STATIC_CRT=1");
         println!("cargo:rustc-flag=-C target-feature=+crt-static");
+    }
+
+    let target_dir =
+        Path::new("../../apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-gpu-1.19.2");
+    let existing_runtime_dll = target_dir.join("lib").join("onnxruntime.dll");
+    if existing_runtime_dll.exists() {
+        println!(
+            "cargo:rustc-link-search=native=../../apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-gpu-1.19.2/lib"
+        );
+        return;
     }
 
     let url = "https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-gpu-1.19.2.zip";
@@ -110,8 +125,6 @@ fn install_onnxruntime() {
     if !status.success() {
         panic!("failed to install onnx binary");
     }
-    let target_dir =
-        Path::new("../../apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-gpu-1.19.2");
     if target_dir.exists() {
         fs::remove_dir_all(target_dir).expect("failed to remove existing directory");
     }
