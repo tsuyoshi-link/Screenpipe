@@ -1569,4 +1569,66 @@ mod tests {
             .unwrap();
         assert_eq!(count, 0, "Should count zero results for non-matching query");
     }
+
+    #[tokio::test]
+    async fn test_search_ui_special_chars_does_not_error() {
+        let db = setup_test_db().await;
+
+        let result = db
+            .search(
+                "<script>alert(1)</script>",
+                ContentType::UI,
+                10,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "UI search should not fail for special chars: {:?}",
+            result.err()
+        );
+    }
+
+    #[tokio::test]
+    async fn test_search_ocr_non_token_query_does_not_error() {
+        let db = setup_test_db().await;
+
+        let result = db
+            .search(
+                "😀",
+                ContentType::OCR,
+                10,
+                0,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+                None,
+            )
+            .await;
+
+        assert!(
+            result.is_ok(),
+            "OCR search should not fail for non-token query: {:?}",
+            result.err()
+        );
+    }
 }

@@ -112,6 +112,33 @@ pub struct DatabaseManager {
 }
 
 impl DatabaseManager {
+    fn to_safe_fts_query(query: &str) -> Option<String> {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            // Keep only word-like tokens to avoid FTS parser errors from
+            // unbalanced operators/special characters while preserving broad matching.
+            let sanitized = trimmed
+                .split_whitespace()
+                .map(|token| {
+                    token
+                        .chars()
+                        .filter(|c| c.is_alphanumeric() || *c == '_')
+                        .collect::<String>()
+                })
+                .filter(|token| !token.is_empty())
+                .collect::<Vec<_>>()
+                .join(" ");
+
+            if sanitized.is_empty() {
+                None
+            } else {
+                Some(sanitized)
+            }
+        }
+    }
+
     pub async fn new(database_path: &str) -> Result<Self, sqlx::Error> {
         debug!(
             "Initializing DatabaseManager with database path: {}",
@@ -1344,6 +1371,7 @@ impl DatabaseManager {
         browser_url: Option<&str>,
         focused: Option<bool>,
     ) -> Result<Vec<OCRResult>, sqlx::Error> {
+        let safe_query = Self::to_safe_fts_query(query);
         let mut frame_fts_parts = Vec::new();
 
         if let Some(app) = app_name {
@@ -1412,7 +1440,7 @@ impl DatabaseManager {
             } else {
                 "JOIN frames_fts ON frames.id = frames_fts.id"
             },
-            ocr_fts_join = if query.trim().is_empty() {
+            ocr_fts_join = if safe_query.is_none() {
                 ""
             } else {
                 "JOIN ocr_text_fts ON ocr_text.frame_id = ocr_text_fts.frame_id"
@@ -1422,13 +1450,13 @@ impl DatabaseManager {
             } else {
                 "AND frames_fts MATCH ?1"
             },
-            ocr_fts_condition = if query.trim().is_empty() {
+            ocr_fts_condition = if safe_query.is_none() {
                 ""
             } else {
                 "AND ocr_text_fts MATCH ?6"
             },
             // Use FTS5 rank (BM25 relevance) when searching, timestamp when browsing
-            order_clause = if query.trim().is_empty() {
+            order_clause = if safe_query.is_none() {
                 "frames.timestamp DESC"
             } else {
                 "ocr_text_fts.rank, frames.timestamp DESC"
@@ -1447,11 +1475,7 @@ impl DatabaseManager {
             .bind(end_time)
             .bind(min_length.map(|l| l as i64))
             .bind(max_length.map(|l| l as i64))
-            .bind(if query.trim().is_empty() {
-                None
-            } else {
-                Some(query)
-            })
+            .bind(safe_query.as_deref())
             .bind(limit)
             .bind(offset)
             .fetch_all(&self.pool)
@@ -1494,6 +1518,7 @@ impl DatabaseManager {
         speaker_ids: Option<Vec<i64>>,
         speaker_name: Option<&str>,
     ) -> Result<Vec<AudioResult>, sqlx::Error> {
+        let safe_query = Self::to_safe_fts_query(query);
         // base query for audio search
         let mut base_sql = String::from(
             "SELECT
@@ -1516,13 +1541,13 @@ impl DatabaseManager {
              LEFT JOIN tags ON audio_tags.tag_id = tags.id",
         );
         // if query is provided, join the corresponding fts table
-        if !query.is_empty() {
+        if safe_query.is_some() {
             base_sql.push_str(" JOIN audio_transcriptions_fts ON audio_transcriptions_fts.audio_chunk_id = audio_transcriptions.audio_chunk_id");
         }
 
         // build where clause conditions in order
         let mut conditions = Vec::new();
-        if !query.is_empty() {
+        if safe_query.is_some() {
             conditions.push("audio_transcriptions_fts MATCH ?");
         }
         if start_time.is_some() {
@@ -1566,8 +1591,8 @@ impl DatabaseManager {
         let mut query_builder = sqlx::query_as::<_, AudioResultRaw>(&sql);
 
         // bind parameters in the same order as added to the where clause
-        if !query.is_empty() {
-            query_builder = query_builder.bind(query);
+        if let Some(safe_query) = safe_query.as_deref() {
+            query_builder = query_builder.bind(safe_query);
         }
         if let Some(start) = start_time {
             query_builder = query_builder.bind(start);
@@ -1747,6 +1772,7 @@ impl DatabaseManager {
         focused: Option<bool>,
         speaker_name: Option<&str>,
     ) -> Result<usize, sqlx::Error> {
+        let safe_query = Self::to_safe_fts_query(query);
         // if focused or browser_url is present, we run only on OCR
         if focused.is_some() || browser_url.is_some() {
             content_type = ContentType::OCR;
@@ -1827,9 +1853,9 @@ impl DatabaseManager {
         let mut ui_fts_parts = Vec::new();
 
         // Split query parts between frame metadata and OCR content
-        if !query.is_empty() {
-            ocr_fts_parts.push(query.to_owned()); // Just use the query directly
-            ui_fts_parts.push(query.to_owned());
+        if let Some(safe_query) = safe_query.as_ref() {
+            ocr_fts_parts.push(safe_query.to_owned());
+            ui_fts_parts.push(safe_query.to_owned());
         }
         if let Some(app) = app_name {
             if !app.is_empty() {
@@ -1911,7 +1937,7 @@ impl DatabaseManager {
                        AND (json_array_length(?6) = 0 OR audio_transcriptions.speaker_id IN (SELECT value FROM json_each(?6)))
                        {speaker_name_condition}
                 "#,
-                table = if query.is_empty() {
+                table = if safe_query.is_none() {
                     "audio_transcriptions"
                 } else {
                     "audio_transcriptions_fts JOIN audio_transcriptions ON audio_transcriptions_fts.audio_chunk_id = audio_transcriptions.audio_chunk_id"
@@ -1926,7 +1952,7 @@ impl DatabaseManager {
                 } else {
                     ""
                 },
-                match_condition = if query.is_empty() {
+                match_condition = if safe_query.is_none() {
                     "1=1"
                 } else {
                     "audio_transcriptions_fts MATCH ?1"
@@ -1965,7 +1991,7 @@ impl DatabaseManager {
             }
             ContentType::Audio => {
                 let mut query_builder = sqlx::query_scalar(&sql)
-                    .bind(if query.is_empty() { "*" } else { query })
+                    .bind(safe_query.as_deref().unwrap_or("*"))
                     .bind(start_time)
                     .bind(end_time)
                     .bind(min_length.map(|l| l as i64))
@@ -2381,9 +2407,10 @@ impl DatabaseManager {
         offset: u32,
     ) -> Result<Vec<UiContent>, sqlx::Error> {
         // combine search aspects into single fts query
+        let safe_query = Self::to_safe_fts_query(query);
         let mut fts_parts = Vec::new();
-        if !query.is_empty() {
-            fts_parts.push(query.to_owned());
+        if let Some(safe_query) = safe_query.as_ref() {
+            fts_parts.push(safe_query.to_owned());
         }
         if let Some(app) = app_name {
             fts_parts.push(format!("app:{}", app));
@@ -4364,6 +4391,28 @@ mod tests {
 
         // Should match both "Hello" and "World" due to word-by-word matching
         assert_eq!(positions.len(), 2);
+    }
+
+    #[test]
+    fn test_to_safe_fts_query_handles_empty_and_whitespace() {
+        assert_eq!(DatabaseManager::to_safe_fts_query(""), None);
+        assert_eq!(DatabaseManager::to_safe_fts_query("   "), None);
+    }
+
+    #[test]
+    fn test_to_safe_fts_query_quotes_special_chars() {
+        assert_eq!(
+            DatabaseManager::to_safe_fts_query("foo/bar +baz -qux"),
+            Some("foobar baz qux".to_string())
+        );
+    }
+
+    #[test]
+    fn test_to_safe_fts_query_removes_double_quotes() {
+        assert_eq!(
+            DatabaseManager::to_safe_fts_query("hello \"world\""),
+            Some("hello world".to_string())
+        );
     }
 
     fn make_search_match(frame_id: i64, timestamp_secs: i64, app: &str, window: &str, url: &str, confidence: f32) -> SearchMatch {
