@@ -10,6 +10,7 @@
 
 # Rust/Cargo specific files
 *target
+.target-main-build/
 
 # IDE specific files
 .idea/
@@ -62,3 +63,4 @@ __pycache__/
 screenpipe-app-tauri/src-tauri/.next/
 .vercel
 .wrangler/
+apps/screenpipe-app-tauri/e2e/videos/

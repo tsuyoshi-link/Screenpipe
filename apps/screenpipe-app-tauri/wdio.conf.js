@@ -9,7 +9,13 @@ let tauriDriver;
 
 // Helper function to find the correct executable path
 const findExecutablePath = () => {
+	const envPath = process.env.SCREENPIPE_E2E_APP_PATH;
+	if (envPath && fs.existsSync(envPath)) {
+		return envPath;
+	}
+
 	const paths = [
+		'C:/t/release/screenpipe-app.exe',
 		'./src-tauri/target/release/screenpipe-app.exe',
 		'./src-tauri/target/x86_64-pc-windows-msvc/release/screenpipe-app.exe',
 		'./src-tauri/target/release/screenpipe-app',

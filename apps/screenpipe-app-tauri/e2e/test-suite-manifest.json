@@ -1,0 +1,59 @@
+{
+  "version": "2026-02-18",
+  "owner": "screenpipe-app-tauri",
+  "suites": [
+    {
+      "id": "core",
+      "description": "Fast regression suite for TDD bug-fix loop. Run this first.",
+      "command": "bun run test:e2e:core",
+      "target_runtime_minutes": 10,
+      "must_pass_before_fix_merge": true,
+      "specs": [
+        "e2e/tests/health-check.js",
+        "e2e/tests/app-lifecycle.js",
+        "e2e/tests/search-api.js",
+        "e2e/tests/settings-navigation.js",
+        "e2e/tests/settings-persistence.js",
+        "e2e/tests/onboarding-flow.js"
+      ]
+    },
+    {
+      "id": "extended",
+      "description": "Broader regression suite including timeline/perf and MCP integration checks.",
+      "command": "bun run test:e2e:extended",
+      "target_runtime_minutes": 25,
+      "must_pass_before_release": true,
+      "specs": [
+        "e2e/tests/health-check.js",
+        "e2e/tests/app-lifecycle.js",
+        "e2e/tests/search-api.js",
+        "e2e/tests/settings-navigation.js",
+        "e2e/tests/settings-persistence.js",
+        "e2e/tests/onboarding-flow.js",
+        "e2e/tests/timeline-navigation.js",
+        "e2e/tests/window-overlay.js",
+        "e2e/tests/websocket-performance.js",
+        "e2e/tests/timeline-performance.js",
+        "e2e/tests/db-stress.js",
+        "e2e/tests/mcp-integration.js"
+      ]
+    }
+  ],
+  "single_spec_mode": {
+    "description": "Run one spec while fixing one bug.",
+    "command_template": "bun run test:e2e:spec -- ./e2e/tests/<file>.js"
+  },
+  "required_environment": {
+    "os": "Windows 10/11",
+    "binary_paths": [
+      "src-tauri/target/release/screenpipe-app.exe",
+      "src-tauri/target/x86_64-pc-windows-msvc/release/screenpipe-app.exe"
+    ],
+    "tauri_driver": "%USERPROFILE%/.cargo/bin/tauri-driver",
+    "api_health": "http://127.0.0.1:3030/health"
+  },
+  "artifacts": {
+    "video_dir": "e2e/videos",
+    "wdio_reporter": "spec"
+  }
+}

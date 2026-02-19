@@ -88,6 +88,8 @@ class TestRecorder {
 			'30',
 			'-i',
 			'desktop',
+			'-vf',
+			'scale=trunc(iw/2)*2:trunc(ih/2)*2',
 			'-loglevel',
 			'error',
 			'-y',
