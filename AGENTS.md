@@ -5,6 +5,27 @@
 - Priority: `02_projects/screenpipe/AGENTS.md` > `02_projects/AGENTS.md` > `Workspace/AGENTS.md`.
 - Git/commit/push timing rules are managed in `02_projects/AGENTS.md` to avoid duplication.
 
+## Git Branch Model (Single-Repo Product Mode)
+- This repository is operated in a single-repo model for product development.
+- Remotes:
+  - `origin`: `tsuyoshi-link/Screenpipe` (working remote)
+  - `upstream`: `screenpipe/screenpipe` (source of upstream updates)
+- Branch roles:
+  - `sync/main`: upstream sync branch. Keep this branch as upstream-following only; do not add product-specific commits.
+  - `product/main`: product mainline for your app (`Screenpipe + customizations`).
+  - `feature/*`: day-to-day work branches, always created from `product/main`.
+- Sync flow (standard):
+  1. `git fetch upstream`
+  2. `git switch sync/main`
+  3. `git merge --ff-only upstream/main`
+  4. `git push origin sync/main`
+  5. `git switch product/main`
+  6. `git merge sync/main`
+  7. Resolve conflicts, run tests, then push `product/main`
+- Guardrails:
+  - Do not merge `product/main` back into `sync/main`.
+  - Do not use `main` for active development in this repo context (legacy snapshot line).
+
 ## Repository Layout (top-level)
 - `apps/`: Application entrypoints. Main target for Windows exe is `apps/screenpipe-app-tauri`.
 - `crates/`: Rust workspace crates used by app/runtime.
