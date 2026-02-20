@@ -67,21 +67,7 @@ screenpipeは画面と音声を24時間365日録画し、すべてをローカ�
 
 ## インストール
 
-macOS、Linux：
-
-```bash
-curl -fsSL get.screenpi.pe/cli | sh
-screenpipe
-```
-
-Windows：
-
-```bash
-iwr get.screenpi.pe/cli.ps1 | iex
-screenpipe
-```
-
-または[デスクトップアプリをダウンロード](https://screenpi.pe)
+[デスクトップアプリをダウンロード](https://screenpi.pe) — macOS、Windows、Linux対応
 
 ## スペック
 

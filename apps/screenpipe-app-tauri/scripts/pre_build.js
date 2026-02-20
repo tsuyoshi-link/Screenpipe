@@ -53,7 +53,7 @@ const config = {
 	macos: {
 		ffmpegUrlArm: 'https://www.osxexperts.net/ffmpeg7arm.zip',
 		ffprobeUrlArm: 'https://www.osxexperts.net/ffprobe71arm.zip',
-		ffmpegUrlx86_64: 'https://evermeet.cx/ffmpeg/getrelease/zip',
+		ffmpegUrlx86_64: 'https://ffmpeg.martin-riedl.de/download/macos/amd64/1766437297_8.0.1/ffmpeg.zip',
 		ffprobeUrlx86_64: 'https://www.osxexperts.net/ffprobe71intel.zip',
 	},
 }

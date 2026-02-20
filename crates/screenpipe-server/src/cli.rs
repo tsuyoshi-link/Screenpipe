@@ -1,6 +1,7 @@
 use clap::ValueEnum;
 use clap::{Parser, Subcommand, ValueHint};
 use screenpipe_audio::{
+    audio_manager::builder::TranscriptionMode,
     core::engine::AudioTranscriptionEngine as CoreAudioTranscriptionEngine,
     vad::{VadEngineEnum, VadSensitivity},
 };
@@ -8,6 +9,7 @@ use screenpipe_core::Language;
 use screenpipe_db::CustomOcrConfig as DBCustomOcrConfig;
 use screenpipe_db::OcrEngine as DBOcrEngine;
 use screenpipe_vision::{custom_ocr::CustomOcrConfig, utils::OcrEngine as CoreOcrEngine};
+use std::path::PathBuf;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, ValueEnum, PartialEq)]
@@ -26,6 +28,9 @@ pub enum CliAudioTranscriptionEngine {
     WhisperLargeV3Turbo,
     #[clap(name = "whisper-large-v3-turbo-quantized")]
     WhisperLargeV3TurboQuantized,
+    /// Disable transcription (audio capture only, no speech-to-text)
+    #[clap(name = "disabled")]
+    Disabled,
 }
 
 impl From<CliAudioTranscriptionEngine> for CoreAudioTranscriptionEngine {
@@ -48,6 +53,7 @@ impl From<CliAudioTranscriptionEngine> for CoreAudioTranscriptionEngine {
             CliAudioTranscriptionEngine::WhisperLargeV3TurboQuantized => {
                 CoreAudioTranscriptionEngine::WhisperLargeV3TurboQuantized
             }
+            CliAudioTranscriptionEngine::Disabled => CoreAudioTranscriptionEngine::Disabled,
         }
     }
 }
@@ -141,6 +147,25 @@ impl From<CliVadSensitivity> for VadSensitivity {
 }
 
 #[derive(Clone, Debug, ValueEnum, PartialEq)]
+pub enum CliTranscriptionMode {
+    /// Transcribe immediately as audio is captured (default)
+    #[clap(name = "realtime")]
+    Realtime,
+    /// Defer local Whisper inference to idle periods (CPU < threshold)
+    #[clap(name = "smart")]
+    Smart,
+}
+
+impl From<CliTranscriptionMode> for TranscriptionMode {
+    fn from(cli_mode: CliTranscriptionMode) -> Self {
+        match cli_mode {
+            CliTranscriptionMode::Realtime => TranscriptionMode::Realtime,
+            CliTranscriptionMode::Smart => TranscriptionMode::Smart,
+        }
+    }
+}
+
+#[derive(Clone, Debug, ValueEnum, PartialEq)]
 pub enum OutputFormat {
     Text,
     Json,
@@ -189,7 +214,7 @@ pub struct Cli {
     #[arg(long, default_value_t = true)]
     pub use_system_default_audio: bool,
 
-    #[arg(short = 'r', long)]
+    #[arg(short = 'r', long, hide = true)]
     pub realtime_audio_device: Vec<String>,
 
     #[arg(long, value_hint = ValueHint::DirPath)]
@@ -200,12 +225,6 @@ pub struct Cli {
 
     #[arg(short = 'a', long, value_enum, default_value_t = CliAudioTranscriptionEngine::WhisperLargeV3TurboQuantized)]
     pub audio_transcription_engine: CliAudioTranscriptionEngine,
-
-    #[arg(long, default_value_t = false)]
-    pub enable_realtime_audio_transcription: bool,
-
-    #[arg(long, default_value_t = true)]
-    pub enable_realtime_vision: bool,
 
     #[cfg_attr(
         target_os = "macos",
@@ -248,35 +267,32 @@ pub struct Cli {
     #[arg(long)]
     pub ignored_urls: Vec<String>,
 
-    #[arg(long, default_value_t = 60)]
-    pub video_chunk_duration: u64,
-
     #[arg(long = "deepgram-api-key")]
     pub deepgram_api_key: Option<String>,
 
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub auto_destruct_pid: Option<u32>,
 
     #[arg(long, value_enum, default_value_t = CliVadSensitivity::High)]
     pub vad_sensitivity: CliVadSensitivity,
 
+    /// Audio transcription scheduling mode
+    #[arg(long, value_enum, default_value_t = CliTranscriptionMode::Realtime)]
+    pub transcription_mode: CliTranscriptionMode,
+
     #[arg(long, default_value_t = false)]
     pub disable_telemetry: bool,
-
-    #[arg(long, default_value_t = false)]
-    pub enable_llm: bool,
-
-    #[arg(long, default_value_t = true)]
-    pub enable_frame_cache: bool,
-
-    #[arg(long, default_value_t = false)]
-    pub capture_unfocused_windows: bool,
 
     #[arg(long, default_value = "balanced")]
     pub video_quality: String,
 
+    /// Enable input event capture (keyboard, mouse, clipboard)
     #[arg(long, default_value_t = false)]
-    pub enable_ui_events: bool,
+    pub enable_input_capture: bool,
+
+    /// Enable accessibility text capture (AX tree walker)
+    #[arg(long, default_value_t = false)]
+    pub enable_accessibility: bool,
 
     #[arg(long, default_value_t = false)]
     pub enable_sync: bool,
@@ -309,8 +325,12 @@ impl Cli {
     #[cfg(feature = "ui-events")]
     pub fn to_ui_recorder_config(&self) -> crate::ui_recorder::UiRecorderConfig {
         crate::ui_recorder::UiRecorderConfig {
-            enabled: self.enable_ui_events,
+            enabled: self.enable_input_capture || self.enable_accessibility,
+            enable_tree_walker: self.enable_accessibility,
+            record_input_events: self.enable_input_capture,
             excluded_windows: self.ignored_windows.clone(),
+            ignored_windows: self.ignored_windows.clone(),
+            included_windows: self.included_windows.clone(),
             ..Default::default()
         }
     }
@@ -326,6 +346,7 @@ impl Cli {
 // =============================================================================
 
 #[derive(Subcommand)]
+#[allow(clippy::large_enum_variant)]
 pub enum Command {
     /// Start recording screen, audio, and optionally serve the API
     Record(RecordArgs),
@@ -410,10 +431,6 @@ pub struct RecordArgs {
     #[arg(long, default_value_t = true)]
     pub use_system_default_audio: bool,
 
-    /// Audio devices to use for realtime audio transcription
-    #[arg(short = 'r', long)]
-    pub realtime_audio_device: Vec<String>,
-
     /// Data directory. Default to $HOME/.screenpipe
     #[arg(long, value_hint = ValueHint::DirPath)]
     pub data_dir: Option<String>,
@@ -425,14 +442,6 @@ pub struct RecordArgs {
     /// Audio transcription engine to use
     #[arg(short = 'a', long, value_enum, default_value_t = CliAudioTranscriptionEngine::WhisperLargeV3TurboQuantized)]
     pub audio_transcription_engine: CliAudioTranscriptionEngine,
-
-    /// Enable realtime audio transcription
-    #[arg(long, default_value_t = false)]
-    pub enable_realtime_audio_transcription: bool,
-
-    /// Enable realtime vision
-    #[arg(long, default_value_t = true)]
-    pub enable_realtime_vision: bool,
 
     /// OCR engine to use
     #[cfg_attr(
@@ -485,45 +494,37 @@ pub struct RecordArgs {
     #[arg(long)]
     pub ignored_urls: Vec<String>,
 
-    /// Video chunk duration in seconds
-    #[arg(long, default_value_t = 60)]
-    pub video_chunk_duration: u64,
-
     /// Deepgram API Key for audio transcription
     #[arg(long = "deepgram-api-key")]
     pub deepgram_api_key: Option<String>,
 
     /// PID to watch for auto-destruction
-    #[arg(long)]
+    #[arg(long, hide = true)]
     pub auto_destruct_pid: Option<u32>,
 
     /// Voice activity detection sensitivity level
     #[arg(long, value_enum, default_value_t = CliVadSensitivity::High)]
     pub vad_sensitivity: CliVadSensitivity,
 
+    /// Audio transcription scheduling mode: realtime (default) or smart (defer to idle)
+    #[arg(long, value_enum, default_value_t = CliTranscriptionMode::Realtime)]
+    pub transcription_mode: CliTranscriptionMode,
+
     /// Disable telemetry
     #[arg(long, default_value_t = false)]
     pub disable_telemetry: bool,
-
-    /// Enable Local LLM API
-    #[arg(long, default_value_t = false)]
-    pub enable_llm: bool,
-
-    /// Enable frame cache (makes timeline UI available)
-    #[arg(long, default_value_t = true)]
-    pub enable_frame_cache: bool,
-
-    /// Capture windows that are not focused
-    #[arg(long, default_value_t = false)]
-    pub capture_unfocused_windows: bool,
 
     /// Video quality preset: low, balanced, high, max
     #[arg(long, default_value = "balanced")]
     pub video_quality: String,
 
-    /// Enable UI event capture (keyboard, mouse, clipboard)
+    /// Enable input event capture (keyboard, mouse, clipboard)
     #[arg(long, default_value_t = false)]
-    pub enable_ui_events: bool,
+    pub enable_input_capture: bool,
+
+    /// Enable accessibility text capture (AX tree walker)
+    #[arg(long, default_value_t = false)]
+    pub enable_accessibility: bool,
 
     /// Enable cloud sync
     #[arg(long, default_value_t = false)]
@@ -557,12 +558,9 @@ impl RecordArgs {
             disable_audio: cli.disable_audio,
             audio_device: cli.audio_device.clone(),
             use_system_default_audio: cli.use_system_default_audio,
-            realtime_audio_device: cli.realtime_audio_device.clone(),
             data_dir: cli.data_dir.clone(),
             debug: cli.debug,
             audio_transcription_engine: cli.audio_transcription_engine.clone(),
-            enable_realtime_audio_transcription: cli.enable_realtime_audio_transcription,
-            enable_realtime_vision: cli.enable_realtime_vision,
             ocr_engine: cli.ocr_engine.clone(),
             monitor_id: cli.monitor_id.clone(),
             use_all_monitors: cli.use_all_monitors,
@@ -573,16 +571,14 @@ impl RecordArgs {
             ignored_windows: cli.ignored_windows.clone(),
             included_windows: cli.included_windows.clone(),
             ignored_urls: cli.ignored_urls.clone(),
-            video_chunk_duration: cli.video_chunk_duration,
             deepgram_api_key: cli.deepgram_api_key.clone(),
             auto_destruct_pid: cli.auto_destruct_pid,
             vad_sensitivity: cli.vad_sensitivity.clone(),
+            transcription_mode: cli.transcription_mode.clone(),
             disable_telemetry: cli.disable_telemetry,
-            enable_llm: cli.enable_llm,
-            enable_frame_cache: cli.enable_frame_cache,
-            capture_unfocused_windows: cli.capture_unfocused_windows,
             video_quality: cli.video_quality.clone(),
-            enable_ui_events: cli.enable_ui_events,
+            enable_input_capture: cli.enable_input_capture,
+            enable_accessibility: cli.enable_accessibility,
             enable_sync: cli.enable_sync,
             sync_token: cli.sync_token.clone(),
             sync_password: cli.sync_password.clone(),
@@ -605,8 +601,12 @@ impl RecordArgs {
     #[cfg(feature = "ui-events")]
     pub fn to_ui_recorder_config(&self) -> crate::ui_recorder::UiRecorderConfig {
         crate::ui_recorder::UiRecorderConfig {
-            enabled: self.enable_ui_events,
+            enabled: self.enable_input_capture || self.enable_accessibility,
+            enable_tree_walker: self.enable_accessibility,
+            record_input_events: self.enable_input_capture,
             excluded_windows: self.ignored_windows.clone(),
+            ignored_windows: self.ignored_windows.clone(),
+            included_windows: self.included_windows.clone(),
             ..Default::default()
         }
     }
@@ -614,6 +614,45 @@ impl RecordArgs {
     #[cfg(not(feature = "ui-events"))]
     pub fn to_ui_recorder_config(&self) -> crate::ui_recorder::UiRecorderConfig {
         crate::ui_recorder::UiRecorderConfig { enabled: false }
+    }
+
+    /// Convert RecordArgs into a unified RecordingConfig.
+    pub fn into_recording_config(
+        self,
+        data_dir: PathBuf,
+    ) -> crate::recording_config::RecordingConfig {
+        let languages = self.unique_languages().unwrap_or_default();
+        crate::recording_config::RecordingConfig {
+            fps: self.fps,
+            adaptive_fps: self.adaptive_fps,
+            audio_chunk_duration: self.audio_chunk_duration,
+            port: self.port,
+            data_dir,
+            disable_audio: self.disable_audio,
+            disable_vision: self.disable_vision,
+            disable_ocr: false,
+            use_pii_removal: self.use_pii_removal,
+            enable_input_capture: self.enable_input_capture,
+            enable_accessibility: self.enable_accessibility,
+            audio_transcription_engine: self.audio_transcription_engine.into(),
+            ocr_engine: self.ocr_engine.into(),
+            vad_sensitivity: self.vad_sensitivity.into(),
+            transcription_mode: self.transcription_mode.into(),
+            audio_devices: self.audio_device,
+            use_system_default_audio: self.use_system_default_audio,
+            monitor_ids: self.monitor_id.iter().map(|id| id.to_string()).collect(),
+            use_all_monitors: self.use_all_monitors,
+            ignored_windows: self.ignored_windows,
+            included_windows: self.included_windows,
+            ignored_urls: self.ignored_urls,
+            languages,
+            deepgram_api_key: self.deepgram_api_key,
+            user_id: None,
+            video_quality: self.video_quality,
+            use_chinese_mirror: false,
+            analytics_enabled: !self.disable_telemetry,
+            analytics_id: String::new(),
+        }
     }
 }
 

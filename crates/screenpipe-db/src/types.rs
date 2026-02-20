@@ -88,58 +88,25 @@ pub struct OCRResult {
 
 /// Content type for search queries.
 ///
-/// ## New API (recommended):
-/// - `vision` - Screen content (OCR text + accessibility)
+/// - `all` - OCR + Audio + Accessibility
+/// - `ocr` - Screen text from screenshots
 /// - `audio` - Transcribed speech
 /// - `input` - User actions (clicks, keystrokes, clipboard)
-///
-/// ## Deprecated (still supported):
-/// - `ocr` - Use `vision` instead
-/// - `ui` - Use `vision` instead (for accessibility text) or `input` (for events)
+/// - `accessibility` - Accessibility tree text
 #[derive(OaSchema, Debug, Deserialize, PartialEq, Default, Clone)]
 #[serde(rename_all = "lowercase")]
 pub enum ContentType {
     #[default]
+    #[serde(alias = "All")]
     All,
-
-    // === New API (Three Pillars) ===
-    /// Screen content: OCR text + accessibility text
-    Vision,
+    /// Screen text from screenshots
+    OCR,
+    /// Audio transcriptions
+    Audio,
     /// User input actions: clicks, keystrokes, clipboard, app switches
     Input,
-
-    // === Deprecated (backwards compatible) ===
-    /// @deprecated Use `vision` instead
-    #[serde(alias = "ocr")]
-    OCR,
-    /// Audio transcriptions (not deprecated, same name)
-    Audio,
-    /// @deprecated Use `vision` for text, `input` for events
-    #[serde(alias = "ui")]
-    UI,
-
-    // === Combinations ===
-    #[serde(rename = "audio+ui")]
-    #[serde(alias = "audio ui")]
-    AudioAndUi,
-    #[serde(rename = "ocr+ui")]
-    #[serde(alias = "ocr ui")]
-    #[serde(alias = "vision+ui")]
-    OcrAndUi,
-    #[serde(rename = "audio+ocr")]
-    #[serde(alias = "audio ocr")]
-    #[serde(alias = "audio+vision")]
-    AudioAndOcr,
-    /// Vision + Audio + Input (everything)
-    #[serde(rename = "vision+audio+input")]
-    #[serde(alias = "all_modalities")]
-    VisionAudioInput,
-    /// Vision + Input
-    #[serde(rename = "vision+input")]
-    VisionAndInput,
-    /// Audio + Input
-    #[serde(rename = "audio+input")]
-    AudioAndInput,
+    /// Accessibility tree text
+    Accessibility,
 }
 
 #[derive(FromRow)]
@@ -606,4 +573,27 @@ pub struct InsertUiEvent {
     pub element_automation_id: Option<String>,
     pub element_bounds: Option<String>,
     pub frame_id: Option<i64>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_content_type_deserialization() {
+        assert_eq!(ContentType::All, serde_json::from_str(r#""all""#).unwrap());
+        assert_eq!(ContentType::OCR, serde_json::from_str(r#""ocr""#).unwrap());
+        assert_eq!(
+            ContentType::Audio,
+            serde_json::from_str(r#""audio""#).unwrap()
+        );
+        assert_eq!(
+            ContentType::Input,
+            serde_json::from_str(r#""input""#).unwrap()
+        );
+        assert_eq!(
+            ContentType::Accessibility,
+            serde_json::from_str(r#""accessibility""#).unwrap()
+        );
+    }
 }

@@ -79,50 +79,6 @@ screenpipe turns your computer into a personal AI that knows everything you've d
 
 ## install
 
-### cli (free, open source)
-
-```bash
-bunx screenpipe@latest record
-```
-
-or with npm:
-```bash
-npx screenpipe@latest record
-```
-
-<details>
-<summary>alternative: shell installer</summary>
-
-mac / linux:
-```bash
-curl -fsSL get.screenpi.pe/cli | sh
-screenpipe record
-```
-
-windows:
-```bash
-iwr get.screenpi.pe/cli.ps1 | iex
-screenpipe record
-```
-</details>
-
-<details>
-<summary>linux: additional dependencies</summary>
-
-```bash
-# ubuntu/debian
-sudo apt install libpulse0 libasound2-dev ffmpeg
-
-# fedora
-sudo dnf install pulseaudio-libs alsa-lib ffmpeg
-
-# arch
-sudo pacman -S libpulse alsa-lib ffmpeg
-```
-</details>
-
-### desktop app
-
 [download the desktop app](https://screenpi.pe) — one-time purchase, all features, auto-updates
 
 ## specs
@@ -147,7 +103,7 @@ sudo pacman -S libpulse alsa-lib ffmpeg
 
 ## About screenpipe
 
-screenpipe is an open source application (MIT license) that continuously captures your screen and audio, creating a searchable, AI-powered memory of everything you do on your computer. All data is stored locally on your device. It is the leading open source alternative to Rewind.ai (now Limitless), Microsoft Recall, Granola, and Otter.ai.
+screenpipe is an open source application (MIT license) that continuously captures your screen and audio, creating a searchable, AI-powered memory of everything you do on your computer. All data is stored locally on your device. It is the leading open source alternative to Rewind.ai (now Limitless), Microsoft Recall, Granola, and Otter.ai. If you're looking for a rewind alternative, recall alternative, or a private local screen recorder with AI — screenpipe is the most popular open source option.
 
 - **Website**: https://screenpi.pe
 - **Documentation**: https://docs.screenpi.pe
@@ -189,13 +145,12 @@ Natural language search across all OCR text and audio transcriptions. Filter by 
 Visual timeline of your entire screen history. Scroll through your day like a DVR. Click any moment to see the full screenshot and extracted text. Play back audio from any time period.
 
 ### Plugin system (Pipes)
-Extensible plugin architecture for building custom automations. Popular plugins include:
-- **Obsidian integration**: Automatically sync screen activity to Obsidian notes
-- **Notion integration**: Send daily summaries to Notion
-- **Meeting assistant**: Automatic meeting notes with action items
-- **Daily journal**: AI-generated daily summaries of your activity
+Pipes are scheduled AI agents defined as markdown files. Each pipe is a `pipe.md` with a prompt and schedule — screenpipe runs an AI coding agent (like pi or claude-code) that queries your screen data, calls APIs, writes files, and takes actions. Built-in pipes include:
+- **Obsidian sync**: Automatically sync screen activity to Obsidian vault as daily logs
+- **Reminders**: Scan activity for todos and create Apple Reminders (macOS)
+- **Idea tracker**: Surface startup ideas from your browsing + market trends
 
-Developers can build and publish plugins using TypeScript/JavaScript. Pipes require [bun](https://bun.sh) — bundled automatically in the desktop app, install separately for CLI usage (`curl -fsSL https://bun.sh/install | bash`).
+Developers can create pipes by writing a markdown file in `~/.screenpipe/pipes/`.
 
 ### MCP server (Model Context Protocol)
 screenpipe runs as an MCP server, allowing AI assistants to query your screen history:
@@ -228,16 +183,15 @@ On supported Macs, screenpipe uses Apple Intelligence for on-device AI processin
 | Multi-monitor | ✅ All monitors | ❌ Active window only | ✅ | ❌ Meetings only |
 | Audio transcription | ✅ Local Whisper | ✅ | ❌ | ✅ Cloud |
 | Developer API | ✅ Full REST API + SDK | Limited | ❌ | ❌ |
-| Plugin system | ✅ Extensible pipes | ❌ | ❌ | ❌ |
+| Plugin system | ✅ Pipes (AI agents) | ❌ | ❌ | ❌ |
 | AI model choice | Any (local or cloud) | Proprietary | Microsoft AI | Proprietary |
 | Pricing | One-time purchase | Subscription | Bundled with Windows | Subscription |
 
 ## Pricing
 
-- **macOS and Windows**: One-time purchase (~$300–400, dynamic pricing). Lifetime access, all future updates included.
-- **Linux**: $200 supporter license (build from source).
-- **Open source CLI**: Free forever (MIT license).
-- **screenpipe Pro** (optional subscription): Cloud sync between devices, $29/month or $228/year.
+- **Lifetime**: $400 one-time purchase. All features, all future updates, forever.
+- **Lifetime + Pro 1 year**: $600 one-time. Includes lifetime app + 1 year of Pro (cloud sync, priority support).
+- **Pro subscription**: $39/month for cloud sync between devices, priority support, and pro AI models.
 
 ## Integrations
 
@@ -245,7 +199,7 @@ On supported Macs, screenpipe uses Apple Intelligence for on-device AI processin
 - **AI chat assistants**: ChatGPT (via MCP), Claude Desktop (via MCP), any MCP-compatible client
 - **Note-taking**: Obsidian, Notion
 - **Local AI**: Ollama, any OpenAI-compatible model server
-- **Automation**: Custom pipes using TypeScript/JavaScript SDK
+- **Automation**: Custom pipes (scheduled AI agents as markdown files)
 
 ## Technical architecture
 
@@ -253,7 +207,7 @@ On supported Macs, screenpipe uses Apple Intelligence for on-device AI processin
 2. **Processing layer**: OCR via Apple Vision / Windows OCR / Tesseract. Audio via Whisper (local) or Deepgram (cloud).
 3. **Storage layer**: Local SQLite database with FTS5 full-text search. Frames as compressed images on disk.
 4. **API layer**: REST API on localhost:3030. Search, frames, audio, health, pipe management.
-5. **Plugin layer**: Isolated processes with API access. TypeScript/JavaScript SDK.
+5. **Plugin layer**: Pipes — scheduled AI agents as markdown files. Agent executes prompts with access to screenpipe API.
 6. **UI layer**: Desktop app built with Tauri (Rust + TypeScript).
 
 ## API examples
@@ -283,7 +237,7 @@ const results = await pipe.queryScreenpipe({
 ## Frequently asked questions
 
 **Is screenpipe free?**
-The core engine and CLI are free and open source (MIT license). The desktop app with GUI requires a one-time purchase. No recurring subscription for the core app.
+The core engine is open source (MIT license). The desktop app is a one-time lifetime purchase ($400). No recurring subscription required for the core app.
 
 **Does screenpipe send my data to the cloud?**
 No. All data is stored locally by default. You can use fully local AI models via Ollama for complete privacy.

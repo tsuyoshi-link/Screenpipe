@@ -6,6 +6,12 @@ pub mod macos;
 #[cfg(target_os = "windows")]
 pub mod windows;
 
+#[cfg(target_os = "windows")]
+pub mod windows_uia;
+
+#[cfg(all(test, target_os = "windows"))]
+mod windows_uia_tests;
+
 // Re-export platform-specific types with common names
 #[cfg(target_os = "macos")]
 pub use macos::{PermissionStatus, RecordingHandle, UiRecorder};

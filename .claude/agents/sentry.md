@@ -8,6 +8,23 @@ tools: Bash, Read
 
 Query Sentry issues for Screenpipe applications.
 
+## IMPORTANT: Always Include Version Context
+
+Before reporting issues, **always check the current released versions**:
+
+```bash
+echo "App:" && grep '^version' /Users/louisbeaumont/Documents/screenpipe/apps/screenpipe-app-tauri/src-tauri/Cargo.toml | head -1
+echo "CLI:" && grep '^version' /Users/louisbeaumont/Documents/screenpipe/Cargo.toml | head -1
+```
+
+For every issue you report, you **MUST**:
+1. Extract the **app/CLI version from the issue's tags** (look for `release`, `version`, or `app_version` tags in the latest event)
+2. Compare it against the **current released version**
+3. Include this in your output, e.g.: `Last seen on: v2.0.465 (current: v2.0.470 — may be outdated)`
+4. If an issue only has events from old versions (3+ versions behind), flag it as **"possibly fixed in newer versions"**
+
+This prevents wasting time investigating issues that have already been fixed in recent releases.
+
 ## Configuration
 
 **Org:** `mediar`
@@ -137,7 +154,12 @@ print(f'Event: {r.get(\"eventID\", \"?\")}')
 print(f'Message: {r.get(\"message\", r.get(\"title\", \"?\"))}')
 print(f'Timestamp: {r.get(\"dateCreated\", \"?\")}')
 print()
-print('Tags:')
+print('Version/Release:')
+for t in r.get('tags', []):
+    if t['key'] in ('release', 'version', 'app_version', 'os', 'os.name'):
+        print(f'  {t[\"key\"]}: {t[\"value\"]}')
+print()
+print('All Tags:')
 for t in r.get('tags', []):
     print(f'  {t[\"key\"]}: {t[\"value\"]}')
 print()

@@ -9,38 +9,17 @@ icon: "terminal"
 
 ## setup
 
-Claude Code connects to screenpipe via MCP (Model Context Protocol). there are two ways to set this up:
-
-### option 1: one-click from screenpipe app (recommended)
-
-1. open the **screenpipe app**
-2. go to **settings** → **connections**
-3. click **"install extension"** next to Claude Code
-4. done! Claude Code now has access to screenpipe
-
-### option 2: CLI command
-
 ```bash
-# add screenpipe MCP server to Claude Code
 claude mcp add screenpipe --transport stdio -- npx -y screenpipe-mcp
 ```
 
-### option 3: add from JSON config
+to make it available across all your projects:
 
-```bash
-claude mcp add-json screenpipe '{"type":"stdio","command":"npx","args":["-y","screenpipe-mcp"]}'
-```
-
-<Tip>
-use `--scope user` to make screenpipe available in all your projects:
 ```bash
 claude mcp add screenpipe --transport stdio --scope user -- npx -y screenpipe-mcp
 ```
-</Tip>
 
 ## verify connection
-
-check that screenpipe is connected:
 
 ```bash
 # list MCP servers
@@ -56,9 +35,7 @@ once connected, Claude Code has access to these tools:
 
 | tool | description |
 |------|-------------|
-| `search-content` | search screen OCR, audio transcriptions with time/app filters |
-| `search-ui-events` | search accessibility data: keyboard input, mouse clicks, app switches, clipboard (macOS) |
-| `get-ui-event-stats` | get aggregated UI event statistics by app and event type |
+| `search-content` | search screen OCR, audio transcriptions, input events with time/app filters |
 | `export-video` | create video exports from screen recordings |
 
 ## usage examples
@@ -87,12 +64,12 @@ ask Claude Code to use screenpipe naturally:
 
 ## search parameters
 
-### search-content (screen OCR + audio)
+### search-content (vision + audio + input)
 
 | parameter | description |
 |-----------|-------------|
 | `q` | search query (optional - omit to get all content) |
-| `content_type` | `ocr`, `audio`, `ui`, or `all` (default: `all`) |
+| `content_type` | `vision`, `audio`, `accessibility`, `input`, or `all` (default: `all`) |
 | `limit` | max results (default: 10) |
 | `offset` | pagination offset |
 | `start_time` | ISO 8601 UTC start time |
@@ -103,26 +80,6 @@ ask Claude Code to use screenpipe naturally:
 | `speaker_ids` | comma-separated speaker IDs for audio filtering |
 | `speaker_name` | filter audio by speaker name |
 
-### search-ui-events (accessibility data - macOS)
-
-| parameter | description |
-|-----------|-------------|
-| `q` | search text content, app name, window title |
-| `event_type` | `click`, `text`, `scroll`, `key`, `app_switch`, `window_focus`, `clipboard` |
-| `app_name` | filter by application |
-| `window_name` | filter by window title |
-| `start_time` | ISO 8601 UTC start time |
-| `end_time` | ISO 8601 UTC end time |
-| `limit` | max results (default: 50) |
-| `offset` | pagination offset |
-
-<Tip>
-**event types explained:**
-- `text` - aggregated keyboard input (what was typed)
-- `click` - mouse clicks with element labels from accessibility APIs
-- `app_switch` / `window_focus` - track which apps you used
-- `clipboard` - copy/paste operations with content
-</Tip>
 
 ## example workflows
 
@@ -152,14 +109,8 @@ ask Claude Code to use screenpipe naturally:
 
 **track what you typed:**
 ```
-> what did I write in Notion this morning? use ui-events
-> to find my keyboard input
-```
-
-**analyze productivity:**
-```
-> get my app usage stats for today and tell me which apps
-> I spent the most time in
+> what did I write in Notion this morning? search for my
+> keyboard input using content_type=input
 ```
 
 **recall clipboard history:**
@@ -188,4 +139,6 @@ ask Claude Code to use screenpipe naturally:
 
 **permission errors?**
 - macos: check System Settings > Privacy & Security > Screen Recording
-- ensure screenpipe app/CLI is listed and enabled
+- ensure screenpipe app is listed and enabled
+
+still stuck? [ask in our discord](https://discord.gg/dU9EBuw7Uq).

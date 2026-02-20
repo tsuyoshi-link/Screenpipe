@@ -61,6 +61,8 @@ mod obsidian_sync;
 mod reminders;
 mod pi;
 mod embedded_server;
+mod suggestions;
+mod voice_training;
 
 pub use server::*;
 
@@ -462,6 +464,7 @@ async fn apply_shortcuts(app: &AppHandle, config: &ShortcutConfig) -> Result<(),
         config.is_disabled("show_chat"),
         |app| {
             info!("show chat shortcut triggered");
+            let _ = app.emit("shortcut-show-chat", ());
             // Toggle the chat window - hide if visible, show if not.
             // Use order_out (not close) to preserve the pre-created panel
             // so it can reappear on fullscreen Spaces without re-creation.
@@ -933,6 +936,33 @@ async fn is_server_running(app: AppHandle) -> Result<bool, String> {
 async fn main() {
     let _ = fix_path_env::fix();
 
+    // Single-instance check: if sidecar server is already listening, hand off and exit.
+    // This covers Linux (where tauri-plugin-single-instance is disabled due to
+    // zbus/tokio conflict) and acts as a fallback on macOS/Windows.
+    {
+        let args: Vec<String> = std::env::args().collect();
+        let deep_link_url = args
+            .iter()
+            .find(|a| a.starts_with("screenpipe://"))
+            .cloned();
+
+        if let Ok(resp) = reqwest::Client::new()
+            .post("http://127.0.0.1:11435/focus")
+            .timeout(std::time::Duration::from_secs(2))
+            .json(&serde_json::json!({
+                "args": args,
+                "deep_link_url": deep_link_url,
+            }))
+            .send()
+            .await
+        {
+            if resp.status().is_success() {
+                eprintln!("screenpipe: another instance is already running — focused existing window, exiting.");
+                std::process::exit(0);
+            }
+        }
+    }
+
     // Check if telemetry is disabled via store setting (analyticsEnabled)
     // Use ~/.screenpipe to match CLI default data directory
     let telemetry_disabled = dirs::home_dir()
@@ -1092,6 +1122,8 @@ async fn main() {
                 commands::open_pipe_window,
                 commands::update_show_screenpipe_shortcut,
                 commands::show_window,
+                commands::open_login_window,
+                commands::ensure_webview_focus,
                 commands::close_window,
                 commands::reset_main_window,
                 commands::set_window_size,
@@ -1108,6 +1140,9 @@ async fn main() {
                 // Window-specific shortcut commands (dynamic registration)
                 commands::register_window_shortcuts,
                 commands::unregister_window_shortcuts,
+                // Frame quick actions: copy frame image, copy deeplink
+                commands::copy_frame_to_clipboard,
+                commands::copy_deeplink_to_clipboard,
                 // Rollback commands
                 commands::rollback_to_version,
                 // Commands from tray.rs
@@ -1156,6 +1191,10 @@ async fn main() {
                 reminders::reminders_set_custom_prompt,
                 reminders::reminders_get_audio_only,
                 reminders::reminders_set_audio_only,
+                // Voice training
+                voice_training::train_voice,
+                // Suggestions
+                suggestions::get_cached_suggestions,
             ])
             .typ::<SettingsStore>()
             .typ::<OnboardingStore>()
@@ -1166,7 +1205,9 @@ async fn main() {
             .typ::<obsidian_sync::ObsidianSyncStatus>()
             .typ::<reminders::RemindersStatus>()
             .typ::<reminders::ReminderItem>()
-            .typ::<reminders::ScanResult>();
+            .typ::<reminders::ScanResult>()
+            .typ::<suggestions::CachedSuggestions>()
+            .typ::<suggestions::Suggestion>();
 
         if let Err(e) = builder
             .export(
@@ -1185,6 +1226,7 @@ async fn main() {
     let pi_state = pi::PiState(Arc::new(tokio::sync::Mutex::new(None)));
     let obsidian_sync_state = obsidian_sync::ObsidianSyncState::new();
     let reminders_state = reminders::RemindersState::new();
+    let suggestions_state = suggestions::SuggestionsState::new();
     #[allow(clippy::single_match)]
     let app = tauri::Builder::default()
         .plugin(tauri_plugin_opener::init())
@@ -1217,11 +1259,18 @@ async fn main() {
         // inside an existing tokio runtime (nested block_on), so skip it on Linux
         ;
         #[cfg(not(target_os = "linux"))]
-        let app = app.plugin(tauri_plugin_single_instance::init(|app, _args, _cwd| {
-            // Gracefully handle case where no windows exist yet (can happen during early init)
-            let windows = app.webview_windows();
-            if let Some(window) = windows.values().next() {
-                let _ = window.set_focus();
+        let app = app.plugin(tauri_plugin_single_instance::init(|app, args, _cwd| {
+            // Focus the existing window
+            show_main_window(app, false);
+
+            // Forward deep-link URL from args
+            if let Some(url) = args.iter().find(|a| a.starts_with("screenpipe://")) {
+                let _ = app.emit("deep-link-received", url.clone());
+            }
+
+            // Forward CLI args
+            if !args.is_empty() {
+                let _ = app.emit("second-instance-args", args.clone());
             }
         }));
         let app = app
@@ -1242,6 +1291,7 @@ async fn main() {
         .manage(pi_state)
         .manage(obsidian_sync_state)
         .manage(reminders_state)
+        .manage(suggestions_state)
         .invoke_handler(tauri::generate_handler![
             spawn_screenpipe,
             stop_screenpipe,
@@ -1261,6 +1311,8 @@ async fn main() {
             commands::get_disk_usage,
             commands::open_pipe_window,
             commands::show_window,
+            commands::open_login_window,
+            commands::ensure_webview_focus,
             commands::close_window,
             commands::reset_main_window,
             commands::set_window_size,
@@ -1279,6 +1331,9 @@ async fn main() {
             // Window-specific shortcut commands (dynamic registration)
             commands::register_window_shortcuts,
             commands::unregister_window_shortcuts,
+            // Frame quick actions: copy frame image to clipboard
+            commands::copy_frame_to_clipboard,
+            commands::copy_deeplink_to_clipboard,
             // Overlay commands (Windows)
             commands::enable_overlay_click_through,
             commands::disable_overlay_click_through,
@@ -1334,7 +1389,11 @@ async fn main() {
             // Rollback commands
             commands::rollback_to_version,
             // OCR commands
-            commands::perform_ocr_on_image
+            commands::perform_ocr_on_image,
+            // Voice training
+            voice_training::train_voice,
+            // Suggestions
+            suggestions::get_cached_suggestions
         ])
         .setup(move |app| {
             //deep link register_all
@@ -1498,8 +1557,6 @@ async fn main() {
                         map.insert("port".into(), serde_json::json!(store.port));
                         map.insert("disable_audio".into(), serde_json::json!(store.disable_audio));
                         map.insert("audio_transcription_engine".into(), serde_json::json!(store.audio_transcription_engine));
-                        map.insert("enable_realtime_audio_transcription".into(), serde_json::json!(store.enable_realtime_audio_transcription));
-                        map.insert("enable_realtime_vision".into(), serde_json::json!(store.enable_realtime_vision));
                         map.insert("ocr_engine".into(), serde_json::json!(store.ocr_engine));
                         map.insert("monitor_ids".into(), serde_json::json!(store.monitor_ids));
                         map.insert("use_all_monitors".into(), serde_json::json!(store.use_all_monitors));
@@ -1507,14 +1564,12 @@ async fn main() {
                         map.insert("use_pii_removal".into(), serde_json::json!(store.use_pii_removal));
                         map.insert("disable_vision".into(), serde_json::json!(store.disable_vision));
                         map.insert("vad_sensitivity".into(), serde_json::json!(store.vad_sensitivity));
-                        map.insert("enable_frame_cache".into(), serde_json::json!(store.enable_frame_cache));
-                        map.insert("enable_ui_events".into(), serde_json::json!(store.enable_ui_events));
-                        map.insert("enable_beta".into(), serde_json::json!(store.enable_beta));
+                        map.insert("enable_input_capture".into(), serde_json::json!(store.enable_input_capture));
+                        map.insert("enable_accessibility".into(), serde_json::json!(store.enable_accessibility));
                         map.insert("auto_start_enabled".into(), serde_json::json!(store.auto_start_enabled));
                         map.insert("platform".into(), serde_json::json!(store.platform));
                         map.insert("embedded_llm_enabled".into(), serde_json::json!(store.embedded_llm.enabled));
                         map.insert("embedded_llm_model".into(), serde_json::json!(store.embedded_llm.model));
-                        map.insert("restart_interval".into(), serde_json::json!(store.restart_interval));
                         // Only send counts for privacy-sensitive lists (not actual values)
                         map.insert("audio_device_count".into(), serde_json::json!(store.audio_devices.len()));
                         map.insert("ignored_windows_count".into(), serde_json::json!(store.ignored_windows.len()));
@@ -1535,6 +1590,75 @@ async fn main() {
                 store::OnboardingStore::default()
             });
             app.manage(onboarding_store.clone());
+
+            // Pre-download AI models in background immediately.
+            // These downloads don't need any permissions — they just fetch files to cache.
+            // On macOS, granting screen recording permission restarts the app, killing
+            // in-progress downloads. But:
+            // - hf_hub (whisper) uses temp file + atomic rename — interrupted downloads
+            //   leave no corrupt cache entry, next launch re-downloads cleanly.
+            // - Pyannote/silero use the same atomic pattern (write to .downloading, rename).
+            // - The small models (silero 2MB, pyannote 34MB) likely complete before the
+            //   user finishes clicking through permissions (~15-20s).
+            // - The whisper model (834MB) may or may not complete, but any progress
+            //   reduces wait time after the final restart.
+            {
+                let store_for_download = store.clone();
+                tauri::async_runtime::spawn(async move {
+                    // Determine which whisper model the user's config needs
+                    let engine = match store_for_download.audio_transcription_engine.as_str() {
+                        "deepgram" | "screenpipe-cloud" => None, // Cloud engines don't need local model
+                        _ => {
+                            use screenpipe_audio::core::engine::AudioTranscriptionEngine;
+                            Some(std::sync::Arc::new(match store_for_download.audio_transcription_engine.as_str() {
+                                "whisper-tiny" => AudioTranscriptionEngine::WhisperTiny,
+                                "whisper-tiny-quantized" => AudioTranscriptionEngine::WhisperTinyQuantized,
+                                "whisper-large-v3" => AudioTranscriptionEngine::WhisperLargeV3,
+                                "whisper-large-v3-quantized" => AudioTranscriptionEngine::WhisperLargeV3Quantized,
+                                "whisper-large-v3-turbo" => AudioTranscriptionEngine::WhisperLargeV3Turbo,
+                                _ => AudioTranscriptionEngine::WhisperLargeV3TurboQuantized, // default
+                            }))
+                        }
+                    };
+
+                    // Download whisper model (834MB default) — biggest download, start first
+                    if let Some(engine) = engine {
+                        let engine_clone = engine.clone();
+                        tokio::task::spawn_blocking(move || {
+                            match screenpipe_audio::transcription::whisper::model::download_whisper_model(engine_clone) {
+                                Ok(path) => info!("whisper model pre-download complete: {:?}", path),
+                                Err(e) => warn!("whisper model pre-download failed (will retry at server start): {}", e),
+                            }
+                        });
+                    }
+
+                    // Download small ONNX models in parallel — these complete in seconds
+                    let (_silero_result, _seg_result, _emb_result) = tokio::join!(
+                        async {
+                            match screenpipe_audio::vad::silero::SileroVad::ensure_model_downloaded().await {
+                                Ok(p) => info!("silero vad model pre-download complete: {:?}", p),
+                                Err(e) => warn!("silero vad pre-download failed (will retry): {}", e),
+                            }
+                        },
+                        async {
+                            match screenpipe_audio::speaker::models::get_or_download_model(
+                                screenpipe_audio::speaker::models::PyannoteModel::Segmentation
+                            ).await {
+                                Ok(p) => info!("segmentation model pre-download complete: {:?}", p),
+                                Err(e) => warn!("segmentation pre-download failed (will retry): {}", e),
+                            }
+                        },
+                        async {
+                            match screenpipe_audio::speaker::models::get_or_download_model(
+                                screenpipe_audio::speaker::models::PyannoteModel::Embedding
+                            ).await {
+                                Ok(p) => info!("embedding model pre-download complete: {:?}", p),
+                                Err(e) => warn!("embedding pre-download failed (will retry): {}", e),
+                            }
+                        },
+                    );
+                });
+            }
 
             // Show onboarding window if not completed
             if !onboarding_store.is_completed {
@@ -1568,80 +1692,9 @@ async fn main() {
                 });
             }
 
-            // Auto-start Pi agent in background with default preset config
-            // All AI providers now route through Pi (OpenAI, Ollama, custom, screenpipe-cloud)
-            if onboarding_store.is_completed && !store.ai_presets.is_empty() {
-                let app_handle_pi_boot = app.handle().clone();
-                let store_for_pi = store.clone();
-                tauri::async_runtime::spawn(async move {
-                    // Wait for Pi to be installed and app to settle
-                    tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
-
-                    let default_preset = store_for_pi.ai_presets.iter()
-                        .find(|p| p.default_preset)
-                        .or_else(|| store_for_pi.ai_presets.first());
-
-                    if let Some(preset) = default_preset {
-                        // Normalize model name: old "pi" presets used hyphens (e.g. claude-haiku-4-5-20251001)
-                        // but screenpipe cloud expects @ separator (claude-haiku-4-5@20251001)
-                        let model = if matches!(preset.provider, crate::store::AIProviderType::Pi | crate::store::AIProviderType::ScreenpipeCloud) {
-                            // Fix known model name patterns: last hyphen before date → @
-                            preset.model.replace("4-5-2025", "4-5@2025")
-                                .replace("4-6-2025", "4-6@2025")
-                        } else {
-                            preset.model.clone()
-                        };
-
-                        let provider_config = pi::PiProviderConfig {
-                            provider: match preset.provider {
-                                crate::store::AIProviderType::OpenAI => "openai".to_string(),
-                                crate::store::AIProviderType::NativeOllama => "native-ollama".to_string(),
-                                crate::store::AIProviderType::Custom => "custom".to_string(),
-                                crate::store::AIProviderType::ScreenpipeCloud => "screenpipe-cloud".to_string(),
-                                crate::store::AIProviderType::Pi => "screenpipe-cloud".to_string(),
-                            },
-                            url: preset.url.clone(),
-                            model,
-                            api_key: preset.api_key.clone(),
-                        };
-
-                        let project_dir = dirs::home_dir()
-                            .map(|h| h.join(".screenpipe").join("pi-chat").to_string_lossy().to_string())
-                            .unwrap_or_else(|| "/tmp/screenpipe-pi-chat".to_string());
-
-                        let user_token = store_for_pi.user.token.clone();
-
-                        if let Some(pi_state) = app_handle_pi_boot.try_state::<pi::PiState>() {
-                            let pi_state_clone = pi_state.inner().clone();
-                            // Retry up to 3 times (Pi might still be installing)
-                            for attempt in 1..=3u32 {
-                                info!("Auto-starting Pi agent (attempt {}/3) with provider: {}, model: {}", attempt, provider_config.provider, provider_config.model);
-
-                                let result = pi::pi_start_inner(
-                                    app_handle_pi_boot.clone(),
-                                    &pi_state_clone,
-                                    project_dir.clone(),
-                                    user_token.clone(),
-                                    Some(provider_config.clone()),
-                                ).await;
-
-                                match result {
-                                    Ok(info) => {
-                                        info!("Pi auto-started successfully: {:?}", info);
-                                        break;
-                                    }
-                                    Err(e) => {
-                                        warn!("Pi auto-start attempt {} failed: {}", attempt, e);
-                                        if attempt < 3 {
-                                            tokio::time::sleep(tokio::time::Duration::from_secs(10)).await;
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                });
-            }
+            // Pi is NOT auto-started at boot — it starts lazily when the user opens
+            // the chat (standalone-chat.tsx calls pi_start). An idle watchdog in pi.rs
+            // auto-stops it after 5 minutes of inactivity to avoid stale processes.
 
             // Show shortcut reminder overlay on app startup if enabled AND onboarding is completed
             // Don't show reminder during first-time onboarding to reduce overwhelm
@@ -1739,10 +1792,7 @@ async fn main() {
                             }
 
                             info!("Starting embedded screenpipe server on dedicated runtime...");
-                            let config = embedded_server::EmbeddedServerConfig::from_store(
-                                &store_clone,
-                                base_dir_clone,
-                            );
+                            let config = store_clone.to_recording_config(base_dir_clone);
 
                             match embedded_server::start_embedded_server(config).await {
                                 Ok(handle) => {
@@ -1886,6 +1936,16 @@ async fn main() {
                 // Small delay to ensure everything is ready
                 tokio::time::sleep(tokio::time::Duration::from_secs(5)).await;
                 obsidian_sync::auto_start_scheduler(app_handle_clone, &obsidian_state_clone).await;
+            });
+
+            // Auto-start suggestions scheduler (always on)
+            let suggestions_state = app_handle.state::<suggestions::SuggestionsState>();
+            let suggestions_state_clone = suggestions::SuggestionsState {
+                cache: suggestions_state.cache.clone(),
+                scheduler_handle: suggestions_state.scheduler_handle.clone(),
+            };
+            tauri::async_runtime::spawn(async move {
+                suggestions::auto_start_scheduler(&suggestions_state_clone).await;
             });
 
             // Auto-start reminders scheduler if it was enabled

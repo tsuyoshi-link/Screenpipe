@@ -27,11 +27,10 @@ use futures::future::try_join_all;
 
 use crate::{
     text_similarity::is_similar_transcription, AudioChunksResponse, AudioDevice, AudioEntry,
-    AudioResult, AudioResultRaw, ContentType, DeviceType, FrameData, FrameRow, FrameWindowData,
-    FrameRowLight, InsertUiEvent, OCREntry, OCRResult, OCRResultRaw, OcrEngine, OcrTextBlock, Order,
-    SearchMatch, SearchMatchGroup, SearchResult, Speaker, TagContentType, TextBounds, TextPosition,
-    TimeSeriesChunk, UiContent,
-    UiEventRecord, UiEventRow, VideoMetadata,
+    AudioResult, AudioResultRaw, ContentType, DeviceType, FrameData, FrameRow, FrameRowLight,
+    FrameWindowData, InsertUiEvent, OCREntry, OCRResult, OCRResultRaw, OcrEngine, OcrTextBlock,
+    Order, SearchMatch, SearchMatchGroup, SearchResult, Speaker, TagContentType, TextBounds,
+    TextPosition, TimeSeriesChunk, UiContent, UiEventRecord, UiEventRow, VideoMetadata,
 };
 
 /// Time window (in seconds) to check for similar transcriptions across devices.
@@ -86,17 +85,25 @@ impl ImmediateTx {
 impl Drop for ImmediateTx {
     fn drop(&mut self) {
         if !self.committed {
-            if let Some(conn) = self.conn.take() {
-                // Detach from pool — the connection has an open transaction.
-                // Returning it to the pool would cause "cannot start a transaction
-                // within a transaction" errors on the next use. Detaching drops the
-                // raw connection (closes it) and lets the pool create a fresh one.
+            if let Some(mut conn) = self.conn.take() {
+                // Roll back the open transaction and return the connection to the pool.
                 //
-                // Previous approach used futures::executor::block_on(ROLLBACK) which
-                // can deadlock inside a tokio async context, silently failing and
-                // returning the dirty connection to the pool.
-                let _raw = conn.detach();
-                warn!("ImmediateTx dropped without commit — connection detached (not returned to pool)");
+                // Previous approach detached (leaked) the connection to avoid async
+                // issues, but that slowly exhausted the pool over time.
+                //
+                // We spawn a task to rollback asynchronously. The connection is moved
+                // into the task, so if rollback succeeds, the clean connection is
+                // returned to the pool when dropped. If rollback fails, we detach.
+                warn!("ImmediateTx dropped without commit — scheduling rollback");
+                // Rollback and return the connection to the pool. We spawn an async
+                // task because Drop is synchronous. The connection is moved into the
+                // task; if rollback succeeds, it returns to the pool when dropped.
+                tokio::spawn(async move {
+                    if let Err(e) = sqlx::query("ROLLBACK").execute(&mut *conn).await {
+                        error!("failed to rollback on drop: {}", e);
+                        let _raw = conn.detach();
+                    }
+                });
             }
         }
         // _write_permit is dropped here, releasing the semaphore for the next writer
@@ -113,29 +120,24 @@ pub struct DatabaseManager {
 
 impl DatabaseManager {
     fn to_safe_fts_query(query: &str) -> Option<String> {
-        let trimmed = query.trim();
-        if trimmed.is_empty() {
+        let normalized = query
+            .chars()
+            .map(|ch| {
+                if ch.is_alphanumeric() || ch.is_whitespace() {
+                    ch
+                } else {
+                    ' '
+                }
+            })
+            .collect::<String>()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+
+        if normalized.is_empty() {
             None
         } else {
-            // Keep only word-like tokens to avoid FTS parser errors from
-            // unbalanced operators/special characters while preserving broad matching.
-            let sanitized = trimmed
-                .split_whitespace()
-                .map(|token| {
-                    token
-                        .chars()
-                        .filter(|c| c.is_alphanumeric() || *c == '_')
-                        .collect::<String>()
-                })
-                .filter(|token| !token.is_empty())
-                .collect::<Vec<_>>()
-                .join(" ");
-
-            if sanitized.is_empty() {
-                None
-            } else {
-                Some(sanitized)
-            }
+            Some(normalized)
         }
     }
 
@@ -189,11 +191,11 @@ impl DatabaseManager {
 
         let db_manager = DatabaseManager {
             pool,
-            // 2 permits = at most 2 concurrent writers. SQLite WAL handles 2
-            // concurrent writers fine via busy_timeout retry. The cascade failure
-            // from issue #2181 only occurs at 3+ concurrent writers overwhelming
-            // the retry loop. This balances throughput vs safety.
-            write_semaphore: Arc::new(Semaphore::new(2)),
+            // 1 permit = serialize writes at the app level. With 2 permits the
+            // second writer's BEGIN IMMEDIATE busy-waits 1-5s inside SQLite,
+            // wasting a connection. With 1 permit, writes queue in Rust (zero
+            // overhead) and BEGIN IMMEDIATE succeeds instantly.
+            write_semaphore: Arc::new(Semaphore::new(1)),
         };
 
         // Run migrations after establishing the connection
@@ -252,11 +254,10 @@ impl DatabaseManager {
         Ok(())
     }
 
-    /// Acquire a connection with `BEGIN IMMEDIATE`, serialized via write semaphore.
+    /// Acquire a connection with `BEGIN IMMEDIATE`, serialized via a single-permit semaphore.
     ///
-    /// The semaphore ensures only one writer is active at a time, eliminating
-    /// application-level contention before it reaches SQLite. This means
-    /// `BEGIN IMMEDIATE` should succeed instantly (no other writer holds the lock).
+    /// Only one writer can hold the semaphore at a time, so `BEGIN IMMEDIATE`
+    /// should always succeed instantly (no SQLITE_BUSY contention at the DB level).
     ///
     /// Returns an `ImmediateTx` that automatically detaches the connection on drop
     /// if not committed (preventing dirty connections from poisoning the pool).
@@ -307,11 +308,16 @@ impl DatabaseManager {
         }
     }
 
-    pub async fn insert_audio_chunk(&self, file_path: &str) -> Result<i64, sqlx::Error> {
+    pub async fn insert_audio_chunk(
+        &self,
+        file_path: &str,
+        timestamp: Option<DateTime<Utc>>,
+    ) -> Result<i64, sqlx::Error> {
+        let ts = timestamp.unwrap_or_else(Utc::now);
         let mut tx = self.begin_immediate_with_retry().await?;
         let id = sqlx::query("INSERT INTO audio_chunks (file_path, timestamp) VALUES (?1, ?2)")
             .bind(file_path)
-            .bind(Utc::now())
+            .bind(ts)
             .execute(&mut **tx.conn())
             .await?
             .last_insert_rowid();
@@ -327,10 +333,14 @@ impl DatabaseManager {
         Ok(id.unwrap_or(0))
     }
 
-    pub async fn get_or_insert_audio_chunk(&self, file_path: &str) -> Result<i64, sqlx::Error> {
+    pub async fn get_or_insert_audio_chunk(
+        &self,
+        file_path: &str,
+        timestamp: Option<DateTime<Utc>>,
+    ) -> Result<i64, sqlx::Error> {
         let mut id = self.get_audio_chunk_id(file_path).await?;
         if id == 0 {
-            id = self.insert_audio_chunk(file_path).await?;
+            id = self.insert_audio_chunk(file_path, timestamp).await?;
         }
         Ok(id)
     }
@@ -359,6 +369,7 @@ impl DatabaseManager {
         speaker_id: Option<i64>,
         start_time: Option<f64>,
         end_time: Option<f64>,
+        timestamp: Option<DateTime<Utc>>,
     ) -> Result<i64, sqlx::Error> {
         // Skip empty transcriptions
         let trimmed = transcription.trim();
@@ -381,6 +392,7 @@ impl DatabaseManager {
             return Ok(0);
         }
 
+        let ts = timestamp.unwrap_or_else(Utc::now);
         let text_length = transcription.len() as i64;
         let mut tx = self.begin_immediate_with_retry().await?;
 
@@ -392,7 +404,7 @@ impl DatabaseManager {
         .bind(audio_chunk_id)
         .bind(transcription)
         .bind(offset_index)
-        .bind(Utc::now())
+        .bind(ts)
         .bind(transcription_engine)
         .bind(&device.name)
         .bind(device.device_type == DeviceType::Input)
@@ -414,6 +426,88 @@ impl DatabaseManager {
         } else {
             Ok(result.last_insert_rowid())
         }
+    }
+
+    /// Combined audio chunk + transcription insert in a single transaction.
+    /// This halves the number of BEGIN IMMEDIATE acquisitions compared to
+    /// calling get_or_insert_audio_chunk() + insert_audio_transcription() separately.
+    #[allow(clippy::too_many_arguments)]
+    pub async fn insert_audio_chunk_and_transcription(
+        &self,
+        file_path: &str,
+        transcription: &str,
+        offset_index: i64,
+        transcription_engine: &str,
+        device: &AudioDevice,
+        speaker_id: Option<i64>,
+        start_time: Option<f64>,
+        end_time: Option<f64>,
+        timestamp: Option<DateTime<Utc>>,
+    ) -> Result<i64, sqlx::Error> {
+        // Skip empty transcriptions early (no lock needed)
+        let trimmed = transcription.trim();
+        if trimmed.is_empty() {
+            // Still need to ensure the audio chunk exists
+            return self.get_or_insert_audio_chunk(file_path, timestamp).await;
+        }
+
+        // Read phase: no write lock needed
+        let existing_chunk_id = self.get_audio_chunk_id(file_path).await?;
+
+        if self
+            .has_similar_recent_transcription(trimmed, DEDUP_TIME_WINDOW_SECS)
+            .await?
+        {
+            debug!(
+                "Skipping duplicate transcription (cross-device): {:?}",
+                &trimmed[..trimmed.len().min(50)]
+            );
+            // Still return the chunk id
+            if existing_chunk_id != 0 {
+                return Ok(existing_chunk_id);
+            }
+            // Need to insert the chunk even if transcription is skipped
+            return self.insert_audio_chunk(file_path, timestamp).await;
+        }
+
+        // Write phase: single transaction for both chunk + transcription
+        let ts = timestamp.unwrap_or_else(Utc::now);
+        let text_length = transcription.len() as i64;
+        let mut tx = self.begin_immediate_with_retry().await?;
+
+        // Insert audio chunk if it doesn't exist yet
+        let audio_chunk_id = if existing_chunk_id != 0 {
+            existing_chunk_id
+        } else {
+            sqlx::query("INSERT INTO audio_chunks (file_path, timestamp) VALUES (?1, ?2)")
+                .bind(file_path)
+                .bind(ts)
+                .execute(&mut **tx.conn())
+                .await?
+                .last_insert_rowid()
+        };
+
+        // Insert the transcription
+        sqlx::query(
+            "INSERT OR IGNORE INTO audio_transcriptions (audio_chunk_id, transcription, offset_index, timestamp, transcription_engine, device, is_input_device, speaker_id, start_time, end_time, text_length) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
+        )
+        .bind(audio_chunk_id)
+        .bind(transcription)
+        .bind(offset_index)
+        .bind(ts)
+        .bind(transcription_engine)
+        .bind(&device.name)
+        .bind(device.device_type == DeviceType::Input)
+        .bind(speaker_id)
+        .bind(start_time)
+        .bind(end_time)
+        .bind(text_length)
+        .execute(&mut **tx.conn())
+        .await?;
+
+        tx.commit().await?;
+
+        Ok(audio_chunk_id)
     }
 
     /// Check if a similar transcription exists in the recent time window.
@@ -700,47 +794,39 @@ impl DatabaseManager {
         focused: bool,
         offset_index: Option<i64>,
     ) -> Result<i64, sqlx::Error> {
-        let mut tx = self.begin_immediate_with_retry().await?;
-        debug!("insert_frame Transaction started");
-
-        // Get the most recent video_chunk_id and file_path
+        // Read video_chunk OUTSIDE the write transaction (only needs shared read lock).
         let video_chunk: Option<(i64, String)> = sqlx::query_as(
             "SELECT id, file_path FROM video_chunks WHERE device_name = ?1 ORDER BY id DESC LIMIT 1",
         )
         .bind(device_name)
-        .fetch_optional(&mut **tx.conn())
+        .fetch_optional(&self.pool)
         .await?;
         debug!("Fetched most recent video_chunk: {:?}", video_chunk);
 
-        // If no video chunk is found, return 0
         let (video_chunk_id, file_path) = match video_chunk {
             Some((id, path)) => (id, path),
             None => {
-                debug!("No video chunk found, rolling back transaction");
-                // tx will rollback automatically on drop
+                debug!("No video chunk found, frame will not be inserted");
                 return Ok(0);
             }
         };
 
-        // Use provided offset_index or calculate from DB (legacy fallback)
+        // Calculate offset outside the write tx too (read-only query)
         let offset_index: i64 = match offset_index {
             Some(idx) => idx,
-            None => {
-                // Legacy behavior: calculate from DB records
-                // NOTE: This can cause mismatches when multiple windows are captured per cycle
-                sqlx::query_scalar(
-                    "SELECT COALESCE(MAX(offset_index), -1) + 1 FROM frames WHERE video_chunk_id = ?1",
-                )
-                .bind(video_chunk_id)
-                .fetch_one(&mut **tx.conn())
-                .await?
-            }
+            None => sqlx::query_scalar(
+                "SELECT COALESCE(MAX(offset_index), -1) + 1 FROM frames WHERE video_chunk_id = ?1",
+            )
+            .bind(video_chunk_id)
+            .fetch_one(&self.pool)
+            .await?,
         };
         debug!("insert_frame Using offset_index: {}", offset_index);
 
         let timestamp = timestamp.unwrap_or_else(Utc::now);
 
-        // Insert the new frame with file_path as name and app/window metadata
+        // Only the INSERT needs the write lock
+        let mut tx = self.begin_immediate_with_retry().await?;
         let id = sqlx::query(
             "INSERT INTO frames (video_chunk_id, offset_index, timestamp, name, browser_url, app_name, window_name, focused, device_name) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
         )
@@ -758,7 +844,6 @@ impl DatabaseManager {
         .last_insert_rowid();
         debug!("insert_frame Inserted new frame with id: {}", id);
 
-        // Commit the transaction
         tx.commit().await?;
 
         Ok(id)
@@ -827,20 +912,28 @@ impl DatabaseManager {
         windows: &[FrameWindowData],
         ocr_engine: Arc<OcrEngine>,
     ) -> Result<Vec<(i64, usize)>, sqlx::Error> {
-        let mut tx = self.begin_immediate_with_retry().await?;
+        // Nothing to insert — skip acquiring the write lock entirely.
+        if windows.is_empty() {
+            return Ok(vec![]);
+        }
 
-        // Get the most recent video_chunk_id and file_path
+        // Read the latest video_chunk OUTSIDE the write transaction.
+        // This SELECT only needs a shared read lock, not the exclusive write lock.
+        // Moving it out reduces write lock hold time significantly.
         let video_chunk: Option<(i64, String)> = sqlx::query_as(
             "SELECT id, file_path FROM video_chunks WHERE device_name = ?1 ORDER BY id DESC LIMIT 1",
         )
         .bind(device_name)
-        .fetch_optional(&mut **tx.conn())
+        .fetch_optional(&self.pool)
         .await?;
 
         let (video_chunk_id, file_path) = match video_chunk {
             Some((id, path)) => (id, path),
             None => {
-                // tx will rollback automatically on drop
+                tracing::warn!(
+                    "No video chunk found for device '{}' — frames will not be inserted",
+                    device_name
+                );
                 return Ok(vec![]);
             }
         };
@@ -848,6 +941,9 @@ impl DatabaseManager {
         let timestamp = timestamp.unwrap_or_else(Utc::now);
         let ocr_engine_str = format!("{:?}", *ocr_engine);
         let mut results = Vec::with_capacity(windows.len());
+
+        // Now acquire the write lock — only INSERTs run inside the transaction.
+        let mut tx = self.begin_immediate_with_retry().await?;
 
         for (idx, window) in windows.iter().enumerate() {
             // Insert frame
@@ -891,6 +987,119 @@ impl DatabaseManager {
         );
 
         Ok(results)
+    }
+
+    /// Insert multiple frames (each with their own offset and windows) in a single
+    /// transaction. This acquires the write semaphore once instead of once-per-frame,
+    /// reducing contention from ~10 acquisitions/min to ~2/min.
+    ///
+    /// Returns one Vec<(frame_id, window_idx)> per input frame, in order.
+    pub async fn insert_multi_frames_with_ocr_batch(
+        &self,
+        device_name: &str,
+        frames: &[(chrono::DateTime<chrono::Utc>, i64, Vec<FrameWindowData>)],
+        ocr_engine: Arc<OcrEngine>,
+    ) -> Result<Vec<Vec<(i64, usize)>>, sqlx::Error> {
+        if frames.is_empty() {
+            return Ok(vec![]);
+        }
+
+        // Read the latest video_chunk OUTSIDE the write transaction.
+        let video_chunk: Option<(i64, String)> = sqlx::query_as(
+            "SELECT id, file_path FROM video_chunks WHERE device_name = ?1 ORDER BY id DESC LIMIT 1",
+        )
+        .bind(device_name)
+        .fetch_optional(&self.pool)
+        .await?;
+
+        let (video_chunk_id, file_path) = match video_chunk {
+            Some((id, path)) => (id, path),
+            None => {
+                tracing::warn!(
+                    "No video chunk found for device '{}' — frames will not be inserted",
+                    device_name
+                );
+                return Ok(vec![]);
+            }
+        };
+
+        let ocr_engine_str = format!("{:?}", *ocr_engine);
+        let mut all_results = Vec::with_capacity(frames.len());
+
+        // Single transaction for all frames — one semaphore acquisition.
+        let mut tx = self.begin_immediate_with_retry().await?;
+
+        for (timestamp, offset_index, windows) in frames {
+            let mut frame_results = Vec::with_capacity(windows.len().max(1));
+
+            if windows.is_empty() {
+                // Insert a bare frame even without window/OCR data so the
+                // timeline has something to display (e.g. when OCR is disabled
+                // and no windows were detected).
+                let frame_id = sqlx::query(
+                    "INSERT INTO frames (video_chunk_id, offset_index, timestamp, name, browser_url, app_name, window_name, focused, device_name) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )
+                .bind(video_chunk_id)
+                .bind(offset_index)
+                .bind(timestamp)
+                .bind(&file_path)
+                .bind(Option::<&str>::None)
+                .bind(Option::<&str>::None)
+                .bind(Option::<&str>::None)
+                .bind(false)
+                .bind(device_name)
+                .execute(&mut **tx.conn())
+                .await?
+                .last_insert_rowid();
+
+                frame_results.push((frame_id, 0));
+            }
+
+            for (idx, window) in windows.iter().enumerate() {
+                let frame_id = sqlx::query(
+                    "INSERT INTO frames (video_chunk_id, offset_index, timestamp, name, browser_url, app_name, window_name, focused, device_name) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+                )
+                .bind(video_chunk_id)
+                .bind(offset_index)
+                .bind(timestamp)
+                .bind(&file_path)
+                .bind(window.browser_url.as_deref())
+                .bind(window.app_name.as_deref())
+                .bind(window.window_name.as_deref())
+                .bind(window.focused)
+                .bind(device_name)
+                .execute(&mut **tx.conn())
+                .await?
+                .last_insert_rowid();
+
+                // Only insert ocr_text if there's actual text content
+                if !window.text.is_empty() {
+                    let text_length = window.text.len() as i64;
+                    sqlx::query(
+                        "INSERT INTO ocr_text (frame_id, text, text_json, ocr_engine, text_length) VALUES (?1, ?2, ?3, ?4, ?5)",
+                    )
+                    .bind(frame_id)
+                    .bind(&window.text)
+                    .bind(&window.text_json)
+                    .bind(&ocr_engine_str)
+                    .bind(text_length)
+                    .execute(&mut **tx.conn())
+                    .await?;
+                }
+
+                frame_results.push((frame_id, idx));
+            }
+            all_results.push(frame_results);
+        }
+
+        tx.commit().await?;
+        debug!(
+            "Multi-frame batch inserted {} frames with OCR for device {}",
+            frames.len(),
+            device_name
+        );
+
+        Ok(all_results)
     }
 
     #[allow(clippy::too_many_arguments)]
@@ -950,7 +1159,7 @@ impl DatabaseManager {
                                 speaker_ids,
                                 speaker_name,
                             ),
-                            self.search_ui_monitoring(
+                            self.search_accessibility(
                                 query,
                                 app_name,
                                 window_name,
@@ -978,7 +1187,7 @@ impl DatabaseManager {
                                 browser_url,
                                 focused,
                             ),
-                            self.search_ui_monitoring(
+                            self.search_accessibility(
                                 query,
                                 app_name,
                                 window_name,
@@ -1034,9 +1243,9 @@ impl DatabaseManager {
                     results.extend(audio_results.into_iter().map(SearchResult::Audio));
                 }
             }
-            ContentType::UI => {
+            ContentType::Accessibility => {
                 let ui_results = self
-                    .search_ui_monitoring(
+                    .search_accessibility(
                         query,
                         app_name,
                         window_name,
@@ -1046,142 +1255,13 @@ impl DatabaseManager {
                         offset,
                     )
                     .await?;
-                results.extend(ui_results.into_iter().map(SearchResult::UI));
-            }
-            ContentType::AudioAndUi => {
-                let audio_results = self
-                    .search_audio(
-                        query,
-                        limit / 2,
-                        offset,
-                        start_time,
-                        end_time,
-                        min_length,
-                        max_length,
-                        speaker_ids,
-                        speaker_name,
-                    )
-                    .await?;
-                let ui_results = self
-                    .search_ui_monitoring(
-                        query,
-                        app_name,
-                        window_name,
-                        start_time,
-                        end_time,
-                        limit / 2,
-                        offset,
-                    )
-                    .await?;
-
-                results.extend(audio_results.into_iter().map(SearchResult::Audio));
-                results.extend(ui_results.into_iter().map(SearchResult::UI));
-            }
-            ContentType::OcrAndUi => {
-                let ocr_results = self
-                    .search_ocr(
-                        query,
-                        limit / 2,
-                        offset,
-                        start_time,
-                        end_time,
-                        app_name,
-                        window_name,
-                        min_length,
-                        max_length,
-                        frame_name,
-                        browser_url,
-                        focused,
-                    )
-                    .await?;
-                let ui_results = self
-                    .search_ui_monitoring(
-                        query,
-                        app_name,
-                        window_name,
-                        start_time,
-                        end_time,
-                        limit / 2,
-                        offset,
-                    )
-                    .await?;
-
-                results.extend(ocr_results.into_iter().map(SearchResult::OCR));
-                results.extend(ui_results.into_iter().map(SearchResult::UI));
-            }
-            ContentType::AudioAndOcr => {
-                let audio_results = self
-                    .search_audio(
-                        query,
-                        limit / 2,
-                        offset,
-                        start_time,
-                        end_time,
-                        min_length,
-                        max_length,
-                        speaker_ids,
-                        speaker_name,
-                    )
-                    .await?;
-                let ocr_results = self
-                    .search_ocr(
-                        query,
-                        limit / 2,
-                        offset,
-                        start_time,
-                        end_time,
-                        app_name,
-                        window_name,
-                        min_length,
-                        max_length,
-                        frame_name,
-                        browser_url,
-                        focused,
-                    )
-                    .await?;
-
-                results.extend(audio_results.into_iter().map(SearchResult::Audio));
-                results.extend(ocr_results.into_iter().map(SearchResult::OCR));
-            }
-            ContentType::Vision => {
-                // Vision = OCR + UI monitoring (accessibility text)
-                let ocr_results = self
-                    .search_ocr(
-                        query,
-                        limit / 2,
-                        offset,
-                        start_time,
-                        end_time,
-                        app_name,
-                        window_name,
-                        min_length,
-                        max_length,
-                        frame_name,
-                        browser_url,
-                        focused,
-                    )
-                    .await?;
-                let ui_results = self
-                    .search_ui_monitoring(
-                        query,
-                        app_name,
-                        window_name,
-                        start_time,
-                        end_time,
-                        limit / 2,
-                        offset,
-                    )
-                    .await?;
-
-                results.extend(ocr_results.into_iter().map(SearchResult::OCR));
                 results.extend(ui_results.into_iter().map(SearchResult::UI));
             }
             ContentType::Input => {
-                // Input = UI events (clicks, keystrokes, etc.)
                 let input_results = self
                     .search_ui_events(
                         Some(query),
-                        None, // event_type
+                        None,
                         app_name,
                         window_name,
                         start_time,
@@ -1190,140 +1270,6 @@ impl DatabaseManager {
                         offset,
                     )
                     .await?;
-                results.extend(input_results.into_iter().map(SearchResult::Input));
-            }
-            ContentType::VisionAndInput => {
-                let ocr_results = self
-                    .search_ocr(
-                        query,
-                        limit / 3,
-                        offset,
-                        start_time,
-                        end_time,
-                        app_name,
-                        window_name,
-                        min_length,
-                        max_length,
-                        frame_name,
-                        browser_url,
-                        focused,
-                    )
-                    .await?;
-                let ui_results = self
-                    .search_ui_monitoring(
-                        query,
-                        app_name,
-                        window_name,
-                        start_time,
-                        end_time,
-                        limit / 3,
-                        offset,
-                    )
-                    .await?;
-                let input_results = self
-                    .search_ui_events(
-                        Some(query),
-                        None,
-                        app_name,
-                        window_name,
-                        start_time,
-                        end_time,
-                        limit / 3,
-                        offset,
-                    )
-                    .await?;
-
-                results.extend(ocr_results.into_iter().map(SearchResult::OCR));
-                results.extend(ui_results.into_iter().map(SearchResult::UI));
-                results.extend(input_results.into_iter().map(SearchResult::Input));
-            }
-            ContentType::AudioAndInput => {
-                let audio_results = self
-                    .search_audio(
-                        query,
-                        limit / 2,
-                        offset,
-                        start_time,
-                        end_time,
-                        min_length,
-                        max_length,
-                        speaker_ids,
-                        speaker_name,
-                    )
-                    .await?;
-                let input_results = self
-                    .search_ui_events(
-                        Some(query),
-                        None,
-                        app_name,
-                        window_name,
-                        start_time,
-                        end_time,
-                        limit / 2,
-                        offset,
-                    )
-                    .await?;
-
-                results.extend(audio_results.into_iter().map(SearchResult::Audio));
-                results.extend(input_results.into_iter().map(SearchResult::Input));
-            }
-            ContentType::VisionAudioInput => {
-                let ocr_results = self
-                    .search_ocr(
-                        query,
-                        limit / 4,
-                        offset,
-                        start_time,
-                        end_time,
-                        app_name,
-                        window_name,
-                        min_length,
-                        max_length,
-                        frame_name,
-                        browser_url,
-                        focused,
-                    )
-                    .await?;
-                let ui_results = self
-                    .search_ui_monitoring(
-                        query,
-                        app_name,
-                        window_name,
-                        start_time,
-                        end_time,
-                        limit / 4,
-                        offset,
-                    )
-                    .await?;
-                let audio_results = self
-                    .search_audio(
-                        query,
-                        limit / 4,
-                        offset,
-                        start_time,
-                        end_time,
-                        min_length,
-                        max_length,
-                        speaker_ids,
-                        speaker_name,
-                    )
-                    .await?;
-                let input_results = self
-                    .search_ui_events(
-                        Some(query),
-                        None,
-                        app_name,
-                        window_name,
-                        start_time,
-                        end_time,
-                        limit / 4,
-                        offset,
-                    )
-                    .await?;
-
-                results.extend(ocr_results.into_iter().map(SearchResult::OCR));
-                results.extend(ui_results.into_iter().map(SearchResult::UI));
-                results.extend(audio_results.into_iter().map(SearchResult::Audio));
                 results.extend(input_results.into_iter().map(SearchResult::Input));
             }
         }
@@ -1591,8 +1537,8 @@ impl DatabaseManager {
         let mut query_builder = sqlx::query_as::<_, AudioResultRaw>(&sql);
 
         // bind parameters in the same order as added to the where clause
-        if let Some(safe_query) = safe_query.as_deref() {
-            query_builder = query_builder.bind(safe_query);
+        if let Some(ref q) = safe_query {
+            query_builder = query_builder.bind(q);
         }
         if let Some(start) = start_time {
             query_builder = query_builder.bind(start);
@@ -1671,6 +1617,20 @@ impl DatabaseManager {
         .bind(frame_id)
         .fetch_optional(&self.pool)
         .await
+    }
+
+    /// Get timestamp for a frame. Used for deep link navigation (screenpipe://frame/123).
+    pub async fn get_frame_timestamp(
+        &self,
+        frame_id: i64,
+    ) -> Result<Option<DateTime<Utc>>, sqlx::Error> {
+        Ok(sqlx::query_scalar::<_, Option<DateTime<Utc>>>(
+            "SELECT timestamp FROM frames WHERE id = ?1",
+        )
+        .bind(frame_id)
+        .fetch_optional(&self.pool)
+        .await?
+        .flatten())
     }
 
     /// Get frames after a given frame_id for validation checking
@@ -1798,7 +1758,7 @@ impl DatabaseManager {
 
             let ui_future = Box::pin(self.count_search_results(
                 query,
-                ContentType::UI,
+                ContentType::Accessibility,
                 start_time,
                 end_time,
                 app_name,
@@ -1853,20 +1813,20 @@ impl DatabaseManager {
         let mut ui_fts_parts = Vec::new();
 
         // Split query parts between frame metadata and OCR content
-        if let Some(safe_query) = safe_query.as_ref() {
-            ocr_fts_parts.push(safe_query.to_owned());
-            ui_fts_parts.push(safe_query.to_owned());
+        if let Some(ref q) = safe_query {
+            ocr_fts_parts.push(q.to_owned());
+            ui_fts_parts.push(q.to_owned());
         }
         if let Some(app) = app_name {
             if !app.is_empty() {
                 frame_fts_parts.push(format!("app_name:{}", app));
-                ui_fts_parts.push(format!("app:\"{}\"", app));
+                ui_fts_parts.push(format!("app_name:\"{}\"", app));
             }
         }
         if let Some(window) = window_name {
             if !window.is_empty() {
                 frame_fts_parts.push(format!("window_name:{}", window));
-                ui_fts_parts.push(format!("window:\"{}\"", window));
+                ui_fts_parts.push(format!("window_name:\"{}\"", window));
             }
         }
         if let Some(browser) = browser_url {
@@ -1906,23 +1866,23 @@ impl DatabaseManager {
                     "ocr_text_fts MATCH ?1"
                 }
             ),
-            ContentType::UI => format!(
-                r#"SELECT COUNT(DISTINCT ui_monitoring.id)
+            ContentType::Accessibility => format!(
+                r#"SELECT COUNT(DISTINCT accessibility.id)
                    FROM {table}
                    WHERE {match_condition}
-                       AND (?2 IS NULL OR timestamp >= ?2)
-                       AND (?3 IS NULL OR timestamp <= ?3)
-                       AND (?4 IS NULL OR COALESCE(text_length, LENGTH(ui_monitoring.text_output)) >= ?4)
-                       AND (?5 IS NULL OR COALESCE(text_length, LENGTH(ui_monitoring.text_output)) <= ?5)"#,
+                       AND (?2 IS NULL OR datetime(accessibility.timestamp) >= datetime(?2))
+                       AND (?3 IS NULL OR datetime(accessibility.timestamp) <= datetime(?3))
+                       AND (?4 IS NULL OR LENGTH(accessibility.text_content) >= ?4)
+                       AND (?5 IS NULL OR LENGTH(accessibility.text_content) <= ?5)"#,
                 table = if ui_query.is_empty() {
-                    "ui_monitoring"
+                    "accessibility"
                 } else {
-                    "ui_monitoring_fts JOIN ui_monitoring ON ui_monitoring_fts.ui_id = ui_monitoring.id"
+                    "accessibility_fts JOIN accessibility ON accessibility_fts.rowid = accessibility.id"
                 },
                 match_condition = if ui_query.is_empty() {
                     "1=1"
                 } else {
-                    "ui_monitoring_fts MATCH ?1"
+                    "accessibility_fts MATCH ?1"
                 }
             ),
             ContentType::Audio => format!(
@@ -1979,7 +1939,7 @@ impl DatabaseManager {
                     .fetch_one(&self.pool)
                     .await?
             }
-            ContentType::UI => {
+            ContentType::Accessibility => {
                 sqlx::query_scalar(&sql)
                     .bind(if ui_query.is_empty() { "*" } else { &ui_query })
                     .bind(start_time)
@@ -2029,12 +1989,12 @@ impl DatabaseManager {
         sqlx::Error,
     > {
         let latest_frame: Option<(DateTime<Utc>,)> =
-            sqlx::query_as("SELECT timestamp FROM frames ORDER BY timestamp DESC LIMIT 1")
+            sqlx::query_as("SELECT timestamp FROM frames WHERE timestamp IS NOT NULL AND timestamp != '' ORDER BY timestamp DESC LIMIT 1")
                 .fetch_optional(&self.pool)
                 .await?;
 
         let latest_audio: Option<(DateTime<Utc>,)> =
-            sqlx::query_as("SELECT timestamp FROM audio_chunks ORDER BY timestamp DESC LIMIT 1")
+            sqlx::query_as("SELECT timestamp FROM audio_chunks WHERE timestamp IS NOT NULL AND timestamp != '' ORDER BY timestamp DESC LIMIT 1")
                 .fetch_optional(&self.pool)
                 .await?;
 
@@ -2047,7 +2007,7 @@ impl DatabaseManager {
         {
             Some(_) => {
                 sqlx::query_as(
-                    "SELECT timestamp FROM ui_monitoring ORDER BY timestamp DESC LIMIT 1",
+                    "SELECT timestamp FROM ui_monitoring WHERE timestamp IS NOT NULL AND timestamp != '' ORDER BY timestamp DESC LIMIT 1",
                 )
                 .fetch_optional(&self.pool)
                 .await?
@@ -2174,6 +2134,44 @@ impl DatabaseManager {
         .await
     }
 
+    /// Batch fetch vision tags for multiple frame IDs in a single query.
+    /// Returns a map of frame_id → Vec<tag_name>.
+    pub async fn get_vision_tags_batch(
+        &self,
+        vision_ids: &[i64],
+    ) -> Result<std::collections::HashMap<i64, Vec<String>>, SqlxError> {
+        if vision_ids.is_empty() {
+            return Ok(std::collections::HashMap::new());
+        }
+
+        let placeholders: Vec<String> = vision_ids.iter().map(|_| "?".to_string()).collect();
+        let query_str = format!(
+            r#"
+            SELECT vt.vision_id, t.name
+            FROM tags t
+            JOIN vision_tags vt ON t.id = vt.tag_id
+            WHERE vt.vision_id IN ({})
+            ORDER BY vt.vision_id, t.name
+            "#,
+            placeholders.join(",")
+        );
+
+        let mut query = sqlx::query_as::<_, (i64, String)>(&query_str);
+        for id in vision_ids {
+            query = query.bind(*id);
+        }
+
+        let rows = query.fetch_all(&self.pool).await?;
+
+        let mut result: std::collections::HashMap<i64, Vec<String>> =
+            std::collections::HashMap::new();
+        for (vision_id, tag_name) in rows {
+            result.entry(vision_id).or_default().push(tag_name);
+        }
+
+        Ok(result)
+    }
+
     pub async fn remove_tags(
         &self,
         id: i64,
@@ -2293,6 +2291,7 @@ impl DatabaseManager {
         LEFT JOIN ocr_text ot ON f.id = ot.frame_id
         WHERE f.timestamp >= ?1 AND f.timestamp <= ?2
         ORDER BY f.timestamp DESC, f.offset_index DESC
+        LIMIT 10000
     "#;
 
         // Get audio data with proper time windows for synchronization
@@ -2316,6 +2315,7 @@ impl DatabaseManager {
         LEFT JOIN speakers s ON at.speaker_id = s.id
         WHERE at.timestamp >= ?1 AND at.timestamp <= ?2
         ORDER BY at.timestamp DESC
+        LIMIT 10000
         "#;
 
         // Execute queries in parallel
@@ -2362,28 +2362,80 @@ impl DatabaseManager {
         }
 
         // Process audio data with proper synchronization
-        for row in audio_rows {
-            let timestamp: DateTime<Utc> = row.get("timestamp");
+        // Audio chunks can span multiple frames, so we assign audio to ALL frames
+        // that fall within the audio's time range (timestamp + start_time to timestamp + end_time)
+        //
+        // We pad the search window by 15s on each side because:
+        // - Frames can be 5-15s apart depending on capture rate
+        // - Audio offsets (start_time/end_time) are relative to the chunk timestamp,
+        //   so the actual speech window can be narrow (2-5s) and fall between frames
+        // - Without padding, audio with no frames in its exact window only gets assigned
+        //   to one fallback frame, making it invisible on most of the timeline
+        const AUDIO_FRAME_PAD_SECS: i64 = 15;
 
-            // Find the closest frame
-            if let Some((&key, _)) = frames_map
-                .range(..=(timestamp, i64::MAX))
-                .next_back()
-                .or_else(|| frames_map.iter().next())
-            {
-                if let Some(frame_data) = frames_map.get_mut(&key) {
-                    frame_data.audio_entries.push(AudioEntry {
-                        transcription: row.get("transcription"),
-                        device_name: row.get("audio_device"),
-                        is_input: row.get("is_input_device"),
-                        audio_file_path: row.get("audio_path"),
-                        duration_secs: row.get("duration_secs"),
-                        audio_chunk_id: row.get("audio_chunk_id"),
-                        speaker_id: row.try_get("speaker_id").ok(),
-                        speaker_name: row.try_get("speaker_name").ok(),
-                        start_time: row.try_get("start_time").ok(),
-                        end_time: row.try_get("end_time").ok(),
-                    });
+        for row in audio_rows {
+            let audio_timestamp: DateTime<Utc> = row.get("timestamp");
+            let start_offset: Option<f64> = row.try_get("start_time").ok();
+            let end_offset: Option<f64> = row.try_get("end_time").ok();
+
+            // Calculate audio time range
+            // start_time and end_time are offsets in seconds from the audio timestamp
+            let audio_start = if let Some(start) = start_offset {
+                audio_timestamp + chrono::Duration::milliseconds((start * 1000.0) as i64)
+            } else {
+                audio_timestamp
+            };
+
+            let audio_end = if let Some(end) = end_offset {
+                audio_timestamp + chrono::Duration::milliseconds((end * 1000.0) as i64)
+            } else {
+                // If no end_time, use duration_secs to calculate end
+                let duration: f64 = row.try_get("duration_secs").unwrap_or(5.0);
+                audio_timestamp + chrono::Duration::milliseconds((duration * 1000.0) as i64)
+            };
+
+            // Pad the search range so nearby frames also get the audio indicator
+            let search_start = audio_start - chrono::Duration::seconds(AUDIO_FRAME_PAD_SECS);
+            let search_end = audio_end + chrono::Duration::seconds(AUDIO_FRAME_PAD_SECS);
+
+            // Create the audio entry once
+            let audio_entry = AudioEntry {
+                transcription: row.get("transcription"),
+                device_name: row.get("audio_device"),
+                is_input: row.get("is_input_device"),
+                audio_file_path: row.get("audio_path"),
+                duration_secs: row.get("duration_secs"),
+                audio_chunk_id: row.get("audio_chunk_id"),
+                speaker_id: row.try_get("speaker_id").ok(),
+                speaker_name: row.try_get("speaker_name").ok(),
+                start_time: start_offset,
+                end_time: end_offset,
+            };
+
+            // Find ALL frames within the padded audio time range
+            let matching_keys: Vec<(DateTime<Utc>, i64)> = frames_map
+                .range((search_start, i64::MIN)..=(search_end, i64::MAX))
+                .filter(|((frame_ts, _), _)| *frame_ts >= search_start && *frame_ts <= search_end)
+                .map(|(key, _)| *key)
+                .collect();
+
+            // Add the audio entry to each matching frame
+            for key in &matching_keys {
+                if let Some(frame_data) = frames_map.get_mut(key) {
+                    frame_data.audio_entries.push(audio_entry.clone());
+                }
+            }
+
+            // Fallback: If still no frames matched, assign to closest frame
+            if matching_keys.is_empty() {
+                if let Some((&key, _)) = frames_map
+                    .range(..=(audio_timestamp, i64::MAX))
+                    .next_back()
+                    .or_else(|| frames_map.iter().next())
+                {
+                    if let Some(frame_data) = frames_map.get_mut(&key) {
+                        frame_data.audio_entries.push(audio_entry);
+                    }
                 }
             }
         }
@@ -2407,10 +2459,9 @@ impl DatabaseManager {
         offset: u32,
     ) -> Result<Vec<UiContent>, sqlx::Error> {
         // combine search aspects into single fts query
-        let safe_query = Self::to_safe_fts_query(query);
         let mut fts_parts = Vec::new();
-        if let Some(safe_query) = safe_query.as_ref() {
-            fts_parts.push(safe_query.to_owned());
+        if let Some(q) = Self::to_safe_fts_query(query) {
+            fts_parts.push(q);
         }
         if let Some(app) = app_name {
             fts_parts.push(format!("app:{}", app));
@@ -2456,6 +2507,86 @@ impl DatabaseManager {
                 AND (?3 IS NULL OR ui_monitoring.timestamp <= ?3)
             GROUP BY ui_monitoring.id
             ORDER BY ui_monitoring.timestamp DESC
+            LIMIT ?4 OFFSET ?5
+            "#,
+            base_sql, where_clause
+        );
+
+        sqlx::query_as(&sql)
+            .bind(if combined_query.is_empty() {
+                "*".to_owned()
+            } else {
+                combined_query
+            })
+            .bind(start_time)
+            .bind(end_time)
+            .bind(limit)
+            .bind(offset)
+            .fetch_all(&self.pool)
+            .await
+    }
+
+    /// Search accessibility table for accessibility tree text.
+    /// This reads from the `accessibility` table (written by the tree walker).
+    #[allow(clippy::too_many_arguments)]
+    pub async fn search_accessibility(
+        &self,
+        query: &str,
+        app_name: Option<&str>,
+        window_name: Option<&str>,
+        start_time: Option<DateTime<Utc>>,
+        end_time: Option<DateTime<Utc>>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<UiContent>, sqlx::Error> {
+        let mut fts_parts = Vec::new();
+        if let Some(q) = Self::to_safe_fts_query(query) {
+            fts_parts.push(q);
+        }
+        if let Some(app) = app_name {
+            fts_parts.push(format!("app_name:{}", app));
+        }
+        if let Some(window) = window_name {
+            fts_parts.push(format!("window_name:{}", window));
+        }
+        let combined_query = fts_parts.join(" ");
+
+        let base_sql = if combined_query.is_empty() {
+            "accessibility"
+        } else {
+            "accessibility_fts JOIN accessibility ON accessibility_fts.rowid = accessibility.id"
+        };
+
+        let where_clause = if combined_query.is_empty() {
+            "WHERE 1=1"
+        } else {
+            "WHERE accessibility_fts MATCH ?1"
+        };
+
+        let sql = format!(
+            r#"
+            SELECT
+                accessibility.id,
+                accessibility.text_content AS text_output,
+                accessibility.timestamp,
+                accessibility.app_name,
+                accessibility.window_name,
+                NULL as initial_traversal_at,
+                COALESCE(video_chunks.file_path, '') as file_path,
+                COALESCE(frames.offset_index, 0) as offset_index,
+                frames.name as frame_name,
+                accessibility.browser_url
+            FROM {}
+            LEFT JOIN frames ON
+                frames.timestamp BETWEEN
+                    datetime(accessibility.timestamp, '-1 seconds')
+                    AND datetime(accessibility.timestamp, '+1 seconds')
+            LEFT JOIN video_chunks ON frames.video_chunk_id = video_chunks.id
+            {}
+                AND (?2 IS NULL OR datetime(accessibility.timestamp) >= datetime(?2))
+                AND (?3 IS NULL OR datetime(accessibility.timestamp) <= datetime(?3))
+            GROUP BY accessibility.id
+            ORDER BY accessibility.timestamp DESC
             LIMIT ?4 OFFSET ?5
             "#,
             base_sql, where_clause
@@ -2941,93 +3072,6 @@ impl DatabaseManager {
         );
 
         Ok(frame_ids)
-    }
-
-    pub async fn insert_embeddings(
-        &self,
-        frame_id: i64,
-        embedding: String,
-    ) -> Result<(), sqlx::Error> {
-        sqlx::query("INSERT INTO ocr_text_embeddings (frame_id, embedding) VALUES (?1, ?2)")
-            .bind(frame_id)
-            .bind(embedding)
-            .execute(&self.pool)
-            .await?;
-        Ok(())
-    }
-
-    pub async fn search_similar_embeddings(
-        &self,
-        embedding: Vec<f32>,
-        limit: u32,
-        threshold: f32,
-    ) -> Result<Vec<OCRResult>, sqlx::Error> {
-        debug!("searching similar embeddings with threshold {}", threshold);
-
-        let sql = r#"
-            WITH embedding_matches AS (
-                SELECT
-                    frame_id,
-                    vec_distance_cosine(embedding, vec_f32(?1)) as similarity
-                FROM ocr_text_embeddings
-                WHERE vec_distance_cosine(embedding, vec_f32(?1)) < ?2
-                ORDER BY similarity ASC
-                LIMIT ?3
-            )
-            SELECT
-                ocr_text.frame_id,
-                ocr_text.text as ocr_text,
-                ocr_text.text_json,
-                frames.timestamp,
-                video_chunks.file_path,
-                frames.offset_index,
-                frames.name as frame_name,
-                frames.app_name,
-                ocr_text.ocr_engine,
-                frames.window_name,
-                GROUP_CONCAT(tags.name, ',') as tags,
-                frames.browser_url
-            FROM embedding_matches
-            JOIN ocr_text ON embedding_matches.frame_id = ocr_text.frame_id
-            JOIN frames ON ocr_text.frame_id = frames.id
-            JOIN video_chunks ON frames.video_chunk_id = video_chunks.id
-            LEFT JOIN vision_tags ON frames.id = vision_tags.vision_id
-            LEFT JOIN tags ON vision_tags.tag_id = tags.id
-            GROUP BY ocr_text.frame_id
-            ORDER BY embedding_matches.similarity ASC
-        "#;
-
-        let bytes = embedding.as_bytes();
-
-        let raw_results: Vec<OCRResultRaw> = sqlx::query_as(sql)
-            .bind(bytes)
-            .bind(threshold)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?;
-
-        Ok(raw_results
-            .into_iter()
-            .map(|raw| OCRResult {
-                frame_id: raw.frame_id,
-                ocr_text: raw.ocr_text,
-                text_json: raw.text_json,
-                timestamp: raw.timestamp,
-                file_path: raw.file_path,
-                offset_index: raw.offset_index,
-                app_name: raw.app_name,
-                ocr_engine: raw.ocr_engine,
-                window_name: raw.window_name,
-                frame_name: raw.frame_name,
-                device_name: raw.device_name,
-                tags: raw
-                    .tags
-                    .map(|t| t.split(',').map(String::from).collect())
-                    .unwrap_or_default(),
-                browser_url: raw.browser_url,
-                focused: raw.focused,
-            })
-            .collect())
     }
 
     // Add method to update frame names
@@ -3929,6 +3973,8 @@ LIMIT ? OFFSET ?
     pub async fn insert_ui_event(&self, event: &InsertUiEvent) -> Result<i64, sqlx::Error> {
         let text_length = event.text_content.as_ref().map(|s| s.len() as i32);
 
+        let mut tx = self.begin_immediate_with_retry().await?;
+
         let result = sqlx::query(
             r#"
             INSERT INTO ui_events (
@@ -3975,10 +4021,13 @@ LIMIT ? OFFSET ?
         .bind(&event.element_automation_id)
         .bind(&event.element_bounds)
         .bind(event.frame_id)
-        .execute(&self.pool)
+        .execute(&mut **tx.conn())
         .await?;
 
-        Ok(result.last_insert_rowid())
+        let id = result.last_insert_rowid();
+        tx.commit().await?;
+
+        Ok(id)
     }
 
     /// Insert multiple UI events in a batch
@@ -4053,6 +4102,39 @@ LIMIT ? OFFSET ?
         Ok(count)
     }
 
+    // ============================================================================
+    // Accessibility Text (Tree Walker)
+    // ============================================================================
+
+    /// Insert accessibility tree text into the accessibility table.
+    /// FTS indexing is automatic via SQL triggers.
+    pub async fn insert_accessibility_text(
+        &self,
+        app_name: &str,
+        window_name: &str,
+        text_content: &str,
+        browser_url: Option<&str>,
+    ) -> Result<i64, sqlx::Error> {
+        let mut tx = self.begin_immediate_with_retry().await?;
+
+        let result = sqlx::query(
+            r#"
+            INSERT INTO accessibility (app_name, window_name, text_content, browser_url)
+            VALUES (?1, ?2, ?3, ?4)
+            "#,
+        )
+        .bind(app_name)
+        .bind(window_name)
+        .bind(text_content)
+        .bind(browser_url)
+        .execute(&mut **tx.conn())
+        .await?;
+
+        let id = result.last_insert_rowid();
+        tx.commit().await?;
+        Ok(id)
+    }
+
     /// Get recent UI events for a specific app
     pub async fn get_recent_ui_events_by_app(
         &self,
@@ -4122,6 +4204,40 @@ LIMIT ? OFFSET ?
 
         Ok(rows.into_iter().map(UiEventRecord::from).collect())
     }
+
+    /// Spawn a background task that runs `PRAGMA wal_checkpoint(TRUNCATE)` every 5 minutes.
+    /// This prevents unbounded WAL growth when long-running readers block auto-checkpoint.
+    pub fn start_wal_maintenance(&self) {
+        let pool = self.pool.clone();
+        tokio::spawn(async move {
+            let mut interval = tokio::time::interval(Duration::from_secs(300));
+            loop {
+                interval.tick().await;
+                match sqlx::query("PRAGMA wal_checkpoint(TRUNCATE)")
+                    .fetch_one(&pool)
+                    .await
+                {
+                    Ok(row) => {
+                        let busy: i32 = row.get(0);
+                        let log_pages: i32 = row.get(1);
+                        let checkpointed: i32 = row.get(2);
+                        if busy == 1 {
+                            warn!(
+                                "wal checkpoint: busy (could not truncate), {} pages in WAL",
+                                log_pages
+                            );
+                        } else {
+                            debug!(
+                                "wal checkpoint: truncated, checkpointed {}/{} pages",
+                                checkpointed, log_pages
+                            );
+                        }
+                    }
+                    Err(e) => warn!("wal checkpoint failed: {}", e),
+                }
+            }
+        });
+    }
 }
 
 pub fn find_matching_positions(blocks: &[OcrTextBlock], query: &str) -> Vec<TextPosition> {
@@ -4138,20 +4254,15 @@ pub fn find_matching_positions(blocks: &[OcrTextBlock], query: &str) -> Vec<Text
                 || query_words.iter().any(|&word| text_lower.contains(word));
 
             if matches {
-                let vision_top = block.top.parse::<f32>().unwrap_or(0.0);
-                let height = block.height.parse::<f32>().unwrap_or(0.0);
-                // Convert from Apple Vision coordinates (bottom-left origin, Y up)
-                // to screen coordinates (top-left origin, Y down)
-                let screen_top = 1.0 - vision_top - height;
-
+                // Stored coords are already screen space (top-left origin); use as-is.
                 Some(TextPosition {
                     text: block.text.clone(),
                     confidence: block.conf.parse::<f32>().unwrap_or(0.0),
                     bounds: TextBounds {
                         left: block.left.parse::<f32>().unwrap_or(0.0),
-                        top: screen_top,
+                        top: block.top.parse::<f32>().unwrap_or(0.0),
                         width: block.width.parse::<f32>().unwrap_or(0.0),
-                        height,
+                        height: block.height.parse::<f32>().unwrap_or(0.0),
                     },
                 })
             } else {
@@ -4172,9 +4283,9 @@ fn calculate_confidence(positions: &[TextPosition]) -> f32 {
 /// Parse all OCR text blocks into TextPosition objects with bounding boxes.
 /// Unlike `find_matching_positions`, this returns ALL text positions without filtering.
 ///
-/// Note: Apple Vision framework uses a coordinate system with origin at bottom-left,
-/// where Y increases upward. We convert to standard screen coordinates (origin at
-/// top-left, Y increases downward) by flipping the Y axis: screen_top = 1 - vision_top - height
+/// Stored text_json comes from the vision pipeline after `transform_ocr_coordinates_to_screen`:
+/// coordinates are already screen-relative normalized (0–1) with top-left origin (Y down).
+/// We use bounds as-is; no Y-flip is applied.
 pub fn parse_all_text_positions(blocks: &[OcrTextBlock]) -> Vec<TextPosition> {
     blocks
         .iter()
@@ -4192,9 +4303,9 @@ pub fn parse_all_text_positions(blocks: &[OcrTextBlock]) -> Vec<TextPosition> {
                 return None;
             }
 
-            // Parse bounding box coordinates (Apple Vision uses bottom-left origin)
+            // Parse bounding box (already screen space, top-left origin, normalized 0–1)
             let left = block.left.parse::<f32>().unwrap_or(0.0);
-            let vision_top = block.top.parse::<f32>().unwrap_or(0.0);
+            let top = block.top.parse::<f32>().unwrap_or(0.0);
             let width = block.width.parse::<f32>().unwrap_or(0.0);
             let height = block.height.parse::<f32>().unwrap_or(0.0);
 
@@ -4203,16 +4314,12 @@ pub fn parse_all_text_positions(blocks: &[OcrTextBlock]) -> Vec<TextPosition> {
                 return None;
             }
 
-            // Convert from Apple Vision coordinates (bottom-left origin, Y up)
-            // to screen coordinates (top-left origin, Y down)
-            let screen_top = 1.0 - vision_top - height;
-
             Some(TextPosition {
                 text: block.text.clone(),
                 confidence,
                 bounds: TextBounds {
                     left,
-                    top: screen_top,
+                    top,
                     width,
                     height,
                 },
@@ -4251,12 +4358,10 @@ mod tests {
 
     #[test]
     fn test_parse_all_text_positions_basic() {
-        // Using normalized coordinates (0-1 range) like Apple Vision returns
-        // vision_top=0.9 means 90% up from bottom, with height=0.02
-        // screen_top = 1 - 0.9 - 0.02 = 0.08 (8% from top)
+        // Stored text_json uses screen coords (top-left origin, normalized 0–1); use as-is.
         let blocks = vec![
-            create_test_block("Hello", "95.5", "0.1", "0.9", "0.08", "0.02"),
-            create_test_block("World", "90.0", "0.2", "0.7", "0.1", "0.02"),
+            create_test_block("Hello", "95.5", "0.1", "0.08", "0.08", "0.02"),
+            create_test_block("World", "90.0", "0.2", "0.28", "0.1", "0.02"),
         ];
 
         let positions = parse_all_text_positions(&blocks);
@@ -4265,21 +4370,19 @@ mod tests {
         assert_eq!(positions[0].text, "Hello");
         assert!((positions[0].confidence - 95.5).abs() < 0.01);
         assert!((positions[0].bounds.left - 0.1).abs() < 0.01);
-        // Y-flip: screen_top = 1 - 0.9 - 0.02 = 0.08
         assert!((positions[0].bounds.top - 0.08).abs() < 0.01);
         assert!((positions[0].bounds.width - 0.08).abs() < 0.01);
         assert!((positions[0].bounds.height - 0.02).abs() < 0.01);
 
         assert_eq!(positions[1].text, "World");
         assert!((positions[1].confidence - 90.0).abs() < 0.01);
-        // Y-flip: screen_top = 1 - 0.7 - 0.02 = 0.28
         assert!((positions[1].bounds.top - 0.28).abs() < 0.01);
     }
 
     #[test]
     fn test_parse_all_text_positions_filters_empty_text() {
         let blocks = vec![
-            create_test_block("Hello", "95.5", "0.1", "0.9", "0.08", "0.02"),
+            create_test_block("Hello", "95.5", "0.1", "0.08", "0.08", "0.02"),
             create_test_block("", "90.0", "0.2", "0.5", "0.1", "0.02"),
             create_test_block("   ", "90.0", "0.3", "0.5", "0.1", "0.02"),
         ];
@@ -4403,7 +4506,7 @@ mod tests {
     fn test_to_safe_fts_query_quotes_special_chars() {
         assert_eq!(
             DatabaseManager::to_safe_fts_query("foo/bar +baz -qux"),
-            Some("foobar baz qux".to_string())
+            Some("foo bar baz qux".to_string())
         );
     }
 
@@ -4415,7 +4518,14 @@ mod tests {
         );
     }
 
-    fn make_search_match(frame_id: i64, timestamp_secs: i64, app: &str, window: &str, url: &str, confidence: f32) -> SearchMatch {
+    fn make_search_match(
+        frame_id: i64,
+        timestamp_secs: i64,
+        app: &str,
+        window: &str,
+        url: &str,
+        confidence: f32,
+    ) -> SearchMatch {
         SearchMatch {
             frame_id,
             timestamp: DateTime::from_timestamp(timestamp_secs, 0).unwrap(),
@@ -4436,7 +4546,14 @@ mod tests {
 
     #[test]
     fn test_cluster_single() {
-        let matches = vec![make_search_match(1, 1000, "Chrome", "Google", "https://google.com", 0.9)];
+        let matches = vec![make_search_match(
+            1,
+            1000,
+            "Chrome",
+            "Google",
+            "https://google.com",
+            0.9,
+        )];
         let groups = DatabaseManager::cluster_search_matches(matches, 120);
         assert_eq!(groups.len(), 1);
         assert_eq!(groups[0].group_size, 1);

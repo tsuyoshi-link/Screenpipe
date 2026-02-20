@@ -67,21 +67,7 @@ screenpipe 全天候录制你的屏幕和音频，所有数据存储在本地，
 
 ## 安装
 
-macOS、Linux：
-
-```bash
-curl -fsSL get.screenpi.pe/cli | sh
-screenpipe
-```
-
-Windows：
-
-```bash
-iwr get.screenpi.pe/cli.ps1 | iex
-screenpipe
-```
-
-或者[下载桌面应用](https://screenpi.pe)
+[下载桌面应用](https://screenpi.pe) — 支持 macOS、Windows、Linux
 
 ## 配置要求
 

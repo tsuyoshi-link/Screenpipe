@@ -7,6 +7,10 @@
     "light": "#333333",
     "dark": "#000000"
   },
+  "announcement": {
+    "title": "Get screenpipe — AI that knows everything you've seen, said, or heard →",
+    "href": "https://screenpi.pe/onboarding"
+  },
   "favicon": {
     "light": "favicon.ico",
     "dark": "favicon.ico"
@@ -23,7 +27,7 @@
           },
           {
             "group": "use cases",
-            "pages": ["search-screen-history", "meeting-transcription", "ai-memory"]
+            "pages": ["search-screen-history", "meeting-transcription", "ai-memory", "for-developers"]
           },
           {
             "group": "guides",
@@ -31,12 +35,13 @@
           },
           {
             "group": "integrations",
-            "pages": ["apple-intelligence", "claude-code", "opencode", "openclaw", "cline", "continue", "gemini-cli", "obsidian"]
+            "pages": ["apple-intelligence", "ollama", "claude-code", "opencode", "openclaw", "cline", "continue", "gemini-cli", "obsidian"]
           },
           {
             "group": "reference",
             "pages": ["cli-reference"]
           },
+
           {
             "group": "compare",
             "pages": ["vs-rewind", "vs-recall", "vs-limitless"]
@@ -46,6 +51,10 @@
             "pages": ["faq", "contributing"]
           }
         ]
+      },
+      {
+        "tab": "api reference",
+        "openapi": "openapi.yaml"
       }
     ]
   },
@@ -59,6 +68,10 @@
   },
   "navbar": {
     "links": [
+      {
+        "label": "pricing",
+        "href": "https://screenpi.pe/onboarding"
+      },
       {
         "label": "discord",
         "href": "https://discord.gg/dU9EBuw7Uq"

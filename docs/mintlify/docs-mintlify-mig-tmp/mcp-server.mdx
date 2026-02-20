@@ -9,147 +9,60 @@ screenpipe provides an MCP (Model Context Protocol) server that lets AI assistan
 
 ## claude desktop
 
-### option 1: one-click install (recommended)
+open the **screenpipe app** → **settings** → **connections** → click **"install extension"**
 
-the easiest way to connect screenpipe to Claude Desktop:
+Claude will open and prompt you to confirm. click **install** — done!
 
-1. open the **screenpipe app**
-2. go to **settings** → **connections**
-3. click **"install extension"** next to Claude Desktop
-4. Claude will open and prompt you to confirm the installation
-5. click **install** in Claude's dialog
-
-that's it! try asking Claude: *"what did I do in the last 5 minutes?"*
+try asking Claude: *"what did I do in the last 5 minutes?"*
 
 <Tip>
 make sure screenpipe is running when you use Claude with screenpipe features.
 </Tip>
 
-### option 2: npx (manual)
+## claude code
 
-if you prefer manual setup, edit your Claude Desktop config:
-
-<Tabs>
-  <Tab title="macos">
-    ```bash
-    # open config file
-    code ~/Library/Application\ Support/Claude/claude_desktop_config.json
-    ```
-  </Tab>
-  <Tab title="windows">
-    ```powershell
-    notepad $env:AppData\Claude\claude_desktop_config.json
-    ```
-  </Tab>
-</Tabs>
-
-add this configuration:
-
-```json
-{
-  "mcpServers": {
-    "screenpipe": {
-      "command": "npx",
-      "args": ["-y", "screenpipe-mcp"]
-    }
-  }
-}
-```
-
-restart Claude Desktop after saving.
-
-### option 3: from source
+one command:
 
 ```bash
-git clone https://github.com/screenpipe/screenpipe
-cd screenpipe/crates/screenpipe-integrations/screenpipe-mcp
-npm install
-npm run build
-```
-
-then configure Claude Desktop:
-
-```json
-{
-  "mcpServers": {
-    "screenpipe": {
-      "command": "node",
-      "args": ["/absolute/path/to/screenpipe-mcp/dist/index.js"]
-    }
-  }
-}
-```
-
-## claude code cli
-
-to use with Claude Code:
-
-### option 1: CLI command (recommended)
-
-```bash
-# add screenpipe as an MCP server
 claude mcp add screenpipe --transport stdio -- npx -y screenpipe-mcp
+```
 
-# make it available in all projects
+to make it available across all your projects:
+
+```bash
 claude mcp add screenpipe --transport stdio --scope user -- npx -y screenpipe-mcp
 ```
 
-### option 2: JSON config
+verify with `claude mcp list` or `/mcp` inside Claude Code.
+
+## cursor
+
+[click here to install in cursor](cursor://anysphere.cursor-deeplink/mcp/install?name=screenpipe&config=eyJ0eXBlIjoic3RkaW8iLCJjb21tYW5kIjoibnB4IiwiYXJncyI6WyIteSIsInNjcmVlbnBpcGUtbWNwIl19)
+
+or manually: open **cursor settings** → **mcp** → **add new global mcp server** → set command to `npx` with args `["-y", "screenpipe-mcp"]`.
+
+## other editors (cline, continue, windsurf, etc.)
+
+any editor that supports MCP works with screenpipe. the server command is:
 
 ```bash
-claude mcp add-json screenpipe '{"type":"stdio","command":"npx","args":["-y","screenpipe-mcp"]}'
+npx -y screenpipe-mcp
 ```
 
-### verify connection
-
-```bash
-# list configured servers
-claude mcp list
-
-# inside Claude Code
-/mcp
-```
-
-<Tip>
-if you have Claude Desktop configured, you can import those settings:
-```bash
-claude mcp add-from-claude-desktop
-```
-</Tip>
-
-## cursor ide
-
-to use with Cursor:
-
-1. open **cursor settings** (gear icon)
-2. select **mcp** in the sidebar
-3. click **"add new global mcp server"**
-4. paste the npx configuration:
-
-```json
-{
-  "mcpServers": {
-    "screenpipe": {
-      "command": "npx",
-      "args": ["-y", "screenpipe-mcp"]
-    }
-  }
-}
-```
-
-5. click the refresh icon next to mcp servers
-6. open a new composer in agent mode
+add this as a stdio MCP server in your editor's MCP settings. see also:
+- [continue setup](/continue)
+- [cline setup](/cline)
 
 ## available tools
 
 ### search-content (all platforms)
 
-search through recorded screen content (OCR) and audio transcriptions:
+search through recorded screen content, audio transcriptions, and user input events:
 
 | parameter | type | description |
 |-----------|------|-------------|
 | `q` | string | search query (optional - omit to get recent content) |
-| `content_type` | string | `all`, `ocr`, `audio`, or `ui` (default: `all`) |
+| `content_type` | string | `all`, `ocr`, `audio`, `input`, or `accessibility` (default: `all`) |
 | `limit` | integer | max results (default: 10) |
 | `offset` | integer | pagination offset (default: 0) |
 | `start_time` | string | ISO 8601 UTC start time (e.g., `2024-01-15T10:00:00Z`) |
@@ -161,41 +74,6 @@ search through recorded screen content (OCR) and audio transcriptions:
 | `include_frames` | boolean | include base64 screenshots (OCR only) |
 | `speaker_ids` | string | comma-separated speaker IDs for audio filtering (e.g., `1,2,3`) |
 | `speaker_name` | string | filter audio by speaker name (case-insensitive partial match) |
-
-### search-ui-events (macOS)
-
-search UI input events captured via accessibility APIs. this is the third data modality alongside vision and audio.
-
-| parameter | type | description |
-|-----------|------|-------------|
-| `q` | string | search text content, app name, window title |
-| `event_type` | string | `click`, `text`, `scroll`, `key`, `app_switch`, `window_focus`, `clipboard` |
-| `app_name` | string | filter by application |
-| `window_name` | string | filter by window title |
-| `start_time` | string | ISO 8601 UTC start time |
-| `end_time` | string | ISO 8601 UTC end time |
-| `limit` | integer | max results (default: 50) |
-| `offset` | integer | pagination offset |
-
-**event types:**
-- `text` - aggregated keyboard input (what was typed)
-- `click` - mouse clicks with accessibility element context
-- `app_switch` / `window_focus` - app and window switching
-- `clipboard` - copy/paste operations with content
-- `scroll` - scroll events with delta values
-
-<Note>
-UI events require macOS with Accessibility permissions and "UI Events" enabled in screenpipe settings.
-</Note>
-
-### get-ui-event-stats (macOS)
-
-get aggregated statistics of UI events by app and event type for productivity analysis:
-
-| parameter | type | description |
-|-----------|------|-------------|
-| `start_time` | string | ISO 8601 UTC start time |
-| `end_time` | string | ISO 8601 UTC end time |
 
 ### export-video
 
@@ -216,10 +94,8 @@ try these in Claude or Cursor:
 - "show me what was on my screen in VS Code yesterday"
 - "export a video of my screen from 10am to 11am today"
 - "find what John said in our meeting about the API"
-- "what did I type in Slack today?" (uses search-ui-events)
-- "show me my app usage statistics for the past 3 hours"
-- "what did I copy to my clipboard recently?"
-- "which apps did I switch between most during my work session?"
+- "what did I type in Slack today?" (uses content_type=input)
+- "what did I copy to my clipboard recently?" (uses content_type=input)
 
 ## testing
 
@@ -234,13 +110,49 @@ npx @modelcontextprotocol/inspector npx screenpipe-mcp
 - screenpipe must be running on localhost:3030
 - Node.js >= 18.0.0
 
-## mintlify mcp (use our docs in cursor, claude)
+## manual config (advanced)
 
-add our docs as context in your AI assistant:
+<Expandable title="manual JSON configuration">
+
+if the one-click methods above don't work, you can manually edit config files.
+
+**claude desktop** — edit `~/Library/Application Support/Claude/claude_desktop_config.json` (macOS) or `%AppData%\Claude\claude_desktop_config.json` (Windows):
+
+```json
+{
+  "mcpServers": {
+    "screenpipe": {
+      "command": "npx",
+      "args": ["-y", "screenpipe-mcp"]
+    }
+  }
+}
+```
+
+**cursor** — create `.cursor/mcp.json` in your project root:
+
+```json
+{
+  "mcpServers": {
+    "screenpipe": {
+      "command": "npx",
+      "args": ["-y", "screenpipe-mcp"]
+    }
+  }
+}
+```
+
+**from source:**
 
 ```bash
-npx mint-mcp add screenpipe
+git clone https://github.com/screenpipe/screenpipe
+cd screenpipe/crates/screenpipe-integrations/screenpipe-mcp
+npm install && npm run build
 ```
+
+then point your editor to `node /path/to/screenpipe-mcp/dist/index.js`.
+
+</Expandable>
 
 ## troubleshooting
 
@@ -251,3 +163,5 @@ npx mint-mcp add screenpipe
 
 **macos automation not working?**
 - grant accessibility permissions in System Settings > Privacy & Security > Accessibility
+
+still stuck? [ask in our discord](https://discord.gg/dU9EBuw7Uq) — the community can help debug MCP issues.

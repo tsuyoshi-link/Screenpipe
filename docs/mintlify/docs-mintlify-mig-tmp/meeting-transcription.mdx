@@ -9,26 +9,10 @@ screenpipe automatically transcribes all audio from your meetings, calls, and co
 
 ## setup
 
-```bash
-# start with audio enabled (default)
-bunx screenpipe record
+audio recording is enabled by default in the desktop app. configure audio devices and transcription engine in **settings**.
 
-# list available audio devices
-bunx screenpipe audio list
-
-# capture specific devices
-bunx screenpipe record --audio-device "MacBook Pro Microphone" --audio-device "BlackHole 2ch"
-```
-
-### choose transcription engine
-
-```bash
-# local (default) — most private
-bunx screenpipe record --audio-transcription-engine whisper-large-v3-turbo
-
-# cloud — faster, requires API key
-bunx screenpipe record --audio-transcription-engine deepgram
-```
+- **audio devices**: select which microphones and system audio to capture
+- **transcription engine**: choose between local Whisper (private) or Deepgram (faster, cloud)
 
 ## search transcriptions
 
@@ -74,11 +58,13 @@ curl "http://localhost:3030/speakers/similar?speaker_id=1"
 - use a good microphone
 - reduce background noise
 - `whisper-large-v3-turbo` gives best accuracy
-- add `--language en` if you only speak English (faster)
+- set language to English in settings if you only speak English (faster)
 
 ## privacy
 
 - all transcription runs locally on your device
 - audio files stored in `~/.screenpipe/data/`
 - no audio sent to cloud unless you choose deepgram
-- disable with `--disable-audio`
+- disable audio recording in app settings
+
+questions? [join our discord](https://discord.gg/dU9EBuw7Uq).

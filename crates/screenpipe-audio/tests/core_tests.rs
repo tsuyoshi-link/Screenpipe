@@ -77,6 +77,7 @@ mod tests {
             duration,
             Arc::new(sender),
             is_running,
+            Arc::new(screenpipe_audio::metrics::AudioPipelineMetrics::new()),
         )
         .await;
         println!("record_and_transcribe completed");
@@ -143,6 +144,7 @@ mod tests {
             duration,
             Arc::new(sender),
             is_running,
+            Arc::new(screenpipe_audio::metrics::AudioPipelineMetrics::new()),
         )
         .await
         .unwrap();
@@ -234,6 +236,7 @@ mod tests {
             sample_rate: 44100, // hardcoded based on test data sample rate
             channels: 1,
             device: Arc::new(default_input_device().unwrap()),
+            capture_timestamp: 0,
         };
 
         // Create the missing parameters
@@ -258,7 +261,7 @@ mod tests {
         ));
         let embedding_manager = Arc::new(std::sync::Mutex::new(EmbeddingManager::new(usize::MAX)));
 
-        let (mut segments, _) = prepare_segments(
+        let (mut segments, _, _) = prepare_segments(
             &audio_input.data,
             vad_engine.clone(),
             &segmentation_model_path,
@@ -269,6 +272,10 @@ mod tests {
         .await
         .unwrap();
 
+        let mut whisper_state = whisper_context
+            .create_state()
+            .expect("failed to create whisper state");
+
         let mut transcription_result = String::new();
         while let Some(segment) = segments.recv().await {
             let transcript = stt(
@@ -278,7 +285,7 @@ mod tests {
                 Arc::new(AudioTranscriptionEngine::WhisperLargeV3Turbo),
                 None,
                 vec![Language::Arabic],
-                whisper_context.clone(),
+                &mut whisper_state,
             )
             .await
             .unwrap();
@@ -317,6 +324,7 @@ mod tests {
             sample_rate: 16000, // Adjust this based on your test audio
             channels: 1,
             device: Arc::new(default_output_device().await.unwrap()),
+            capture_timestamp: 0,
         };
 
         let project_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
@@ -359,7 +367,7 @@ mod tests {
         // Measure transcription time
         let start_time = Instant::now();
 
-        let (mut segments, _) = prepare_segments(
+        let (mut segments, _, _) = prepare_segments(
             &audio_input.data,
             vad_engine.clone(),
             &segmentation_model_path,
@@ -370,6 +378,10 @@ mod tests {
         .await
         .unwrap();
 
+        let mut whisper_state = whisper_context
+            .create_state()
+            .expect("failed to create whisper state");
+
         let mut transcription = String::new();
         while let Some(segment) = segments.recv().await {
             let transcript = stt(
@@ -379,7 +391,7 @@ mod tests {
                 Arc::new(AudioTranscriptionEngine::WhisperLargeV3Turbo),
                 None,
                 vec![Language::English],
-                whisper_context.clone(),
+                &mut whisper_state,
             )
             .await
             .unwrap();

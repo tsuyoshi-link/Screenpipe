@@ -73,15 +73,10 @@ pub fn show_main_window(app_handle: &tauri::AppHandle, _overlay: bool) {
            // already "focused" or never lost focus) wouldn't trigger a re-fetch.
            let _ = app_handle.emit("window-focused", true);
 
-           // Register window-specific shortcuts (Escape, Ctrl+Cmd+K) on a separate task
-           // IMPORTANT: This MUST be spawned async to avoid deadlock when called from
-           // within a global shortcut callback (the callback holds the shortcut manager lock)
-           let app_clone = app_handle.clone();
-           std::thread::spawn(move || {
-               // Small delay to ensure we're outside the shortcut callback context
-               std::thread::sleep(std::time::Duration::from_millis(10));
-               let _ = register_window_shortcuts(app_clone);
-           });
+           // NOTE: Window shortcuts (Escape) are registered by the focus-gain
+           // handler in window_api.rs. Do NOT also register them here — doing
+           // so races with the focus handler and causes duplicate
+           // RegisterEventHotKey calls that fail on macOS.
        }
        Err(e) => {
            error!("ShowRewindWindow::Main.show failed: {}", e);
@@ -92,15 +87,9 @@ pub fn show_main_window(app_handle: &tauri::AppHandle, _overlay: bool) {
 #[tauri::command]
 #[specta::specta]
 pub fn hide_main_window(app_handle: &tauri::AppHandle) {
-    // Unregister window-specific shortcuts (Escape, Ctrl+Cmd+K) on a separate task
-    // IMPORTANT: This MUST be spawned async to avoid deadlock when called from
-    // within a global shortcut callback (e.g., Escape key handler)
-    let app_clone = app_handle.clone();
-    std::thread::spawn(move || {
-        // Small delay to ensure we're outside the shortcut callback context
-        std::thread::sleep(std::time::Duration::from_millis(10));
-        let _ = unregister_window_shortcuts(app_clone);
-    });
+    // NOTE: Window shortcuts (Escape) are unregistered by the focus-loss
+    // handler in window_api.rs. Do NOT also unregister them here — doing
+    // so races with the focus handler and causes duplicate unregister calls.
 
     if let Err(e) = ShowRewindWindow::Main.close(app_handle) {
         error!("failed to close main window: {}", e);
@@ -348,6 +337,53 @@ pub async fn get_disk_usage(
     }
 }
 
+/// Open the screenpi.pe login page inside an in-app WebView.
+/// Intercepts the screenpipe:// deep-link redirect so we don't rely on
+/// Safari custom-scheme support (which can silently fail).
+#[tauri::command]
+#[specta::specta]
+pub async fn open_login_window(app_handle: tauri::AppHandle) -> Result<(), String> {
+    use tauri::{WebviewUrl, WebviewWindowBuilder};
+
+    let label = "login-browser";
+
+    // If already open, just focus it
+    if let Some(w) = app_handle.get_webview_window(label) {
+        let _ = w.show();
+        let _ = w.set_focus();
+        return Ok(());
+    }
+
+    let app_for_nav = app_handle.clone();
+
+    WebviewWindowBuilder::new(
+        &app_handle,
+        label,
+        WebviewUrl::External("https://screenpi.pe/login".parse().unwrap()),
+    )
+    .title("sign in to screenpipe")
+    .inner_size(460.0, 700.0)
+    .focused(true)
+    .on_navigation(move |url| {
+        if url.scheme() == "screenpipe" {
+            info!("login window intercepted deep link: {}", url);
+            let _ = app_for_nav.emit("deep-link-received", url.to_string());
+            // Close the login window after a short delay to avoid
+            // closing before the event is delivered
+            if let Some(w) = app_for_nav.get_webview_window("login-browser") {
+                let _ = w.close();
+            }
+            false // block navigation to custom scheme
+        } else {
+            true // allow all https navigations (Clerk, OAuth providers, etc.)
+        }
+    })
+    .build()
+    .map_err(|e| e.to_string())?;
+
+    Ok(())
+}
+
 #[tauri::command]
 #[specta::specta]
 pub async fn show_window(
@@ -363,6 +399,30 @@ pub async fn show_window(
     }
 
     window.show(&app_handle).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Re-assert the WKWebView as first responder for the current key panel.
+/// Called from JS on pointer enter / window focus to ensure trackpad pinch
+/// gestures (magnifyWithEvent:) reach the WKWebView for zoom handling.
+#[tauri::command]
+#[specta::specta]
+pub async fn ensure_webview_focus(app_handle: tauri::AppHandle) -> Result<(), String> {
+    #[cfg(target_os = "macos")]
+    {
+        use crate::window_api::run_on_main_thread_safe;
+        use tauri_nspanel::ManagerExt;
+
+        let app = app_handle.clone();
+        run_on_main_thread_safe(&app_handle, move || {
+            for label in &["main", "main-window"] {
+                if let Ok(panel) = app.get_webview_panel(label) {
+                    unsafe { crate::window_api::make_webview_first_responder(&panel); }
+                    return;
+                }
+            }
+        });
+    }
     Ok(())
 }
 
@@ -523,9 +583,9 @@ pub async fn show_shortcut_reminder(
 
     info!("show_shortcut_reminder called");
 
-    // Window dimensions for dual-shortcut display
+    // Window dimensions: 2-row layout (shortcuts + activity visualization)
     let window_width = 220.0;
-    let window_height = 24.0;
+    let window_height = 40.0;
 
     // Position at top center of the screen where the cursor is
     let (x, y) = {
@@ -757,8 +817,11 @@ pub fn register_window_shortcuts(app_handle: tauri::AppHandle) -> Result<(), Str
             }
         }
     }) {
-        // Ignore "already registered" errors - shortcut may already be active
-        if !e.to_string().contains("already registered") {
+        // Ignore "already registered" / duplicate registration errors.
+        // macOS Carbon API returns "RegisterEventHotKey failed" (not "already
+        // registered") when the hotkey is already active, so check both.
+        let msg = e.to_string();
+        if !msg.contains("already registered") && !msg.contains("RegisterEventHotKey failed") {
             error!("Failed to register Escape shortcut: {}", e);
         }
     }
@@ -831,7 +894,6 @@ pub async fn perform_ocr_on_image(
     image_base64: String,
 ) -> Result<String, String> {
     use crate::store::SettingsStore;
-    use crate::embedded_server::parse_language;
     use screenpipe_vision::OcrEngine;
 
     use base64::Engine;
@@ -850,7 +912,8 @@ pub async fn perform_ocr_on_image(
     let languages: Vec<screenpipe_core::Language> = store
         .languages
         .iter()
-        .filter_map(|s| parse_language(s))
+        .filter(|s| s != &"default")
+        .filter_map(|s| s.parse().ok())
         .collect();
 
     let ocr_engine = match store.ocr_engine.as_str() {
@@ -883,3 +946,42 @@ pub async fn perform_ocr_on_image(
     Ok(text)
 }
 
+/// Copy a frame image to the system clipboard (native API, works in Tauri webview).
+/// Fetches the frame from the local server and uses arboard for clipboard access.
+#[tauri::command]
+#[specta::specta]
+pub async fn copy_frame_to_clipboard(frame_id: i64) -> Result<(), String> {
+    let url = format!("http://127.0.0.1:3030/frames/{}", frame_id);
+    let bytes = reqwest::get(&url)
+        .await
+        .map_err(|e| format!("failed to fetch frame: {}", e))?
+        .bytes()
+        .await
+        .map_err(|e| format!("failed to read frame: {}", e))?;
+
+    let img = image::load_from_memory(&bytes).map_err(|e| format!("failed to decode image: {}", e))?;
+    let rgba = img.to_rgba8();
+
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("clipboard error: {}", e))?;
+    clipboard
+        .set_image(arboard::ImageData {
+            width: rgba.width() as usize,
+            height: rgba.height() as usize,
+            bytes: std::borrow::Cow::from(rgba.into_raw()),
+        })
+        .map_err(|e| format!("failed to set clipboard: {}", e))?;
+
+    Ok(())
+}
+
+/// Copy a frame deeplink (screenpipe://frame/N) to clipboard. Native API only.
+#[tauri::command]
+#[specta::specta]
+pub async fn copy_deeplink_to_clipboard(frame_id: i64) -> Result<(), String> {
+    let link = format!("screenpipe://frame/{}", frame_id);
+    let mut clipboard = arboard::Clipboard::new().map_err(|e| format!("clipboard error: {}", e))?;
+    clipboard
+        .set_text(link)
+        .map_err(|e| format!("failed to set clipboard: {}", e))?;
+    Ok(())
+}

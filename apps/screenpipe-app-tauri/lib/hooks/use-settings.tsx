@@ -89,7 +89,14 @@ export type Settings = SettingsStore & {
 	/** When true, audio devices follow system default and auto-switch on changes */
 	useSystemDefaultAudio?: boolean;
 	adaptiveFps?: boolean;
-	enableUiEvents?: boolean;
+	enableInputCapture?: boolean;
+	enableAccessibility?: boolean;
+	/** Audio transcription scheduling: "realtime" (default) or "smart" (defer to idle) */
+	transcriptionMode?: "realtime" | "smart";
+	/** User's name for speaker identification — input device audio will be labeled with this name */
+	userName?: string;
+	/** When true, screen capture continues but OCR text extraction is skipped (saves CPU) */
+	disableOcr?: boolean;
 }
 
 export const DEFAULT_PROMPT = `Rules:
@@ -140,7 +147,7 @@ const DEFAULT_PI_PRESET: AIPreset = {
 	id: "pi-agent",
 	provider: "pi",
 	url: "",
-	model: "claude-haiku-4-5-20251001",
+	model: "claude-haiku-4-5",
 	maxContextChars: 200000,
 	defaultPreset: true,
 	prompt: "",
@@ -163,7 +170,6 @@ let DEFAULT_SETTINGS: Settings = {
 			audioDevices: ["default"],
 			useSystemDefaultAudio: true,
 			usePiiRemoval: false,
-			restartInterval: 0,
 			port: 3030,
 			dataDir: "default",
 			disableAudio: false,
@@ -180,14 +186,11 @@ let DEFAULT_SETTINGS: Settings = {
 			languages: [],
 			embeddedLLM: {
 				enabled: false,
-				model: "llama3.2:1b-instruct-q4_K_M",
+				model: "ministral-3:latest",
 				port: 11434,
 			},
-			enableBeta: false,
 		updateChannel: "stable",
-			isFirstTimeUser: true,
 			autoStartEnabled: true,
-			enableFrameCache: true,
 			platform: "unknown",
 			disabledShortcuts: [],
 			user: {
@@ -215,22 +218,23 @@ let DEFAULT_SETTINGS: Settings = {
 			stopAudioShortcut: "",
 			showChatShortcut: "Control+Super+L",
 			searchShortcut: "Control+Super+K",
-			enableRealtimeAudioTranscription: false,
 			realtimeAudioTranscriptionEngine: "deepgram",
 			disableVision: false,
+			disableOcr: false,
 			useAllMonitors: true,
 			adaptiveFps: false,
-			enableRealtimeVision: true,
 			showShortcutOverlay: true,
 			chatHistory: {
 				conversations: [],
 				activeConversationId: null,
 				historyEnabled: true,
 			},
-			enableUiEvents: false,
+			enableInputCapture: false,
+			enableAccessibility: true,
 			overlayMode: "fullscreen",
 			showOverlayInScreenRecording: false,
 			videoQuality: "balanced",
+			transcriptionMode: "realtime",
 		};
 
 export function createDefaultSettingsObject(): Settings {
@@ -243,7 +247,13 @@ export function createDefaultSettingsObject(): Settings {
 		DEFAULT_SETTINGS.fps = p === "macos" ? 0.5 : 1;
 		DEFAULT_SETTINGS.showScreenpipeShortcut = p === "windows" ? "Alt+S" : "Control+Super+S";
 		DEFAULT_SETTINGS.showChatShortcut = p === "windows" ? "Alt+L" : "Control+Super+L";
-		DEFAULT_SETTINGS.searchShortcut = p === "windows" ? "Control+Alt+K" : "Control+Super+K";
+		DEFAULT_SETTINGS.searchShortcut = p === "windows" ? "Alt+K" : "Control+Super+K";
+
+		if (p === "windows") {
+			DEFAULT_SETTINGS.enableAccessibility = true;
+			DEFAULT_SETTINGS.enableInputCapture = true;
+			DEFAULT_SETTINGS.disableOcr = true;
+		}
 
 		return DEFAULT_SETTINGS;
 	} catch (e) {
@@ -335,6 +345,20 @@ function createSettingsStore() {
 		if (!settings.showChatShortcut || settings.showChatShortcut.trim() === "") {
 			const p = platform();
 			settings.showChatShortcut = p === "windows" ? "Alt+L" : "Control+Super+L";
+			needsUpdate = true;
+		}
+
+		// Migration: Default Pro subscribers to cloud transcription (one-time only)
+		if (settings.user?.cloud_subscribed && !(settings as any)._proCloudMigrationDone) {
+			// Switch audio transcription to cloud if still on local default
+			if (
+				settings.audioTranscriptionEngine === "whisper-large-v3-turbo" ||
+				settings.audioTranscriptionEngine === "whisper-large-v3-turbo-quantized"
+			) {
+				settings.audioTranscriptionEngine = "screenpipe-cloud";
+				needsUpdate = true;
+			}
+			(settings as any)._proCloudMigrationDone = true;
 			needsUpdate = true;
 		}
 
@@ -460,6 +484,26 @@ export const SettingsProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 				});
 		}
 	}, [settings.analyticsId, settings.user?.id]);
+
+	// When user becomes a Pro subscriber, default to cloud transcription (one-time)
+	useEffect(() => {
+		if (!settings.user?.cloud_subscribed || !isSettingsLoaded) return;
+		if ((settings as any)._proCloudMigrationDone) return;
+
+		// Switch audio transcription to cloud if still on local default
+		if (
+			settings.audioTranscriptionEngine === "whisper-large-v3-turbo" ||
+			settings.audioTranscriptionEngine === "whisper-large-v3-turbo-quantized"
+		) {
+			settingsStore.set({
+				audioTranscriptionEngine: "screenpipe-cloud",
+				_proCloudMigrationDone: true,
+			} as any);
+		} else {
+			// Mark as done even if we didn't change anything
+			settingsStore.set({ _proCloudMigrationDone: true } as any);
+		}
+	}, [settings.user?.cloud_subscribed, isSettingsLoaded]);
 
 	const updateSettings = async (updates: Partial<Settings>) => {
 		await settingsStore.set(updates);

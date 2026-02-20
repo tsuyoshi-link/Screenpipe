@@ -1,6 +1,6 @@
 [package]
 name = "screenpipe-app"
-version = "2.0.441"
+version = "2.0.513"
 description = "24/7 memory for your desktop. 100% local."
 authors = ["you"]
 license = ""
@@ -37,7 +37,6 @@ tauri-plugin-store = "=2.4.2"
 tauri-plugin-http = "=2.5.7"
 
 serde = { version = "1.0", features = ["derive"] }
-serde_derive = "1.0"
 serde_json = "1.0"
 
 tower-http = { version = "0.4.0", features = ["cors", "trace"] }
@@ -71,6 +70,7 @@ tracing-appender = "0.2.3"
 
 
 anyhow = "1.0.71"
+arboard = "3.4"
 
 # System information
 sysinfo = "=0.29.0"
@@ -126,7 +126,6 @@ tauri-plugin-updater = "2.10.0"
 
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
-libc = "0.2.152"
 cocoa = "0.26.0"
 objc = "0.2.7"
 block = "0.1"
@@ -173,7 +172,6 @@ metal = ["screenpipe-audio/metal"]
 pulseaudio = ["screenpipe-audio/pulseaudio"]
 vulkan = ["screenpipe-audio/vulkan"]
 mkl = []
-llm = []
 cargo-clippy = []
 default = ["custom-protocol"]
 

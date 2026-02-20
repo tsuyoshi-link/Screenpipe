@@ -51,13 +51,11 @@ pub async fn request_permission(permission: OSPermission) {
             OSPermission::ScreenRecording => {
                 use core_graphics_helmer_fork::access::ScreenCaptureAccess;
                 if !ScreenCaptureAccess.preflight() {
-                    // Try request() first — on macOS this opens System Settings for
-                    // screen recording (there's no modal prompt for screen capture).
-                    // If the app is already in the TCC list as denied, request() may
-                    // silently no-op, so we also open settings directly as fallback.
-                    ScreenCaptureAccess.request();
-                    // Also open System Settings directly to ensure the user sees it
+                    // Open System Settings first so it's in the background,
+                    // then request() shows the native modal on top (macOS 15+).
+                    // If the user dismisses the modal, Settings is already open.
                     open_permission_settings(OSPermission::ScreenRecording);
+                    ScreenCaptureAccess.request();
                 }
             }
             OSPermission::Microphone => {

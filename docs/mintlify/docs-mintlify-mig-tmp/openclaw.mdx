@@ -88,8 +88,8 @@ if OpenClaw runs on the same machine as screenpipe, query the REST API directly:
 # search content
 curl -s "http://localhost:3030/search?q=QUERY&limit=20"
 
-# filter by type: ocr, audio, ui
-curl -s "http://localhost:3030/search?q=QUERY&content_type=ocr"
+# filter by type: vision, audio, input
+curl -s "http://localhost:3030/search?q=QUERY&content_type=vision"
 
 # filter by app
 curl -s "http://localhost:3030/search?q=QUERY&app_name=Chrome"

@@ -1,5 +1,3 @@
-// screenpipe — AI that knows everything you've seen, said, or heard
-// https://screenpi.pe
 #[cfg(target_os = "windows")]
 use std::{env, fs};
 use std::{
@@ -86,48 +84,42 @@ fn install_onnxruntime() {
     use reqwest::blocking::Client;
     use std::time::Duration;
     use std::{path::Path, process::Command};
-    // Opt-in static CRT for knf-rs on Windows. Default to dynamic CRT to avoid
-    // runtime-library mismatches with other native deps in local builds.
-    if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() == "msvc"
-        && env::var("SCREENPIPE_KNF_STATIC_CRT").ok().as_deref() == Some("1")
-    {
+    // Set static CRT for Windows MSVC target
+    if env::var("CARGO_CFG_TARGET_ENV").unwrap_or_default() == "msvc" {
         println!("cargo:rustc-env=KNF_STATIC_CRT=1");
         println!("cargo:rustc-flag=-C target-feature=+crt-static");
     }
 
+    // Use CPU-only onnxruntime — GPU (DirectML) causes issues on Intel integrated GPUs
     let target_dir =
-        Path::new("../../apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-gpu-1.19.2");
-    let existing_runtime_dll = target_dir.join("lib").join("onnxruntime.dll");
-    if existing_runtime_dll.exists() {
-        println!(
-            "cargo:rustc-link-search=native=../../apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-gpu-1.19.2/lib"
+        Path::new("../../apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-1.19.2");
+
+    // Skip download if already present (CI pre-downloads via workflow step)
+    if !target_dir.join("lib").join("onnxruntime.lib").exists() {
+        let url = "https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip";
+        let client = Client::builder()
+            .timeout(Duration::from_secs(300))
+            .build()
+            .expect("failed to build client");
+        let resp = client.get(url).send().expect("request failed");
+        let body = resp.bytes().expect("body invalid");
+        fs::write("./onnxruntime-win-x64-1.19.2.zip", &body).expect("failed to write");
+        let unzip_path = find_unzip().expect(
+            "could not find unzip executable - please install it via GnuWin32 or add it to PATH",
         );
-        return;
-    }
 
-    let url = "https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-gpu-1.19.2.zip";
-    let client = Client::builder()
-        .timeout(Duration::from_secs(300))
-        .build()
-        .expect("failed to build client");
-    let resp = client.get(url).send().expect("request failed");
-    let body = resp.bytes().expect("body invalid");
-    fs::write("./onnxruntime-win-x64-gpu-1.19.2.zip", &body).expect("failed to write");
-    let unzip_path = find_unzip().expect(
-        "could not find unzip executable - please install it via GnuWin32 or add it to PATH",
-    );
+        let status = Command::new(unzip_path)
+            .args(["-o", "onnxruntime-win-x64-1.19.2.zip"])
+            .status()
+            .expect("failed to execute unzip");
 
-    let status = Command::new(unzip_path)
-        .args(["-o", "onnxruntime-win-x64-gpu-1.19.2.zip"])
-        .status()
-        .expect("failed to execute unzip");
-
-    if !status.success() {
-        panic!("failed to install onnx binary");
+        if !status.success() {
+            panic!("failed to install onnx binary");
+        }
+        if target_dir.exists() {
+            fs::remove_dir_all(target_dir).expect("failed to remove existing directory");
+        }
+        fs::rename("onnxruntime-win-x64-1.19.2", target_dir).expect("failed to rename");
     }
-    if target_dir.exists() {
-        fs::remove_dir_all(target_dir).expect("failed to remove existing directory");
-    }
-    fs::rename("onnxruntime-win-x64-gpu-1.19.2", target_dir).expect("failed to rename");
-    println!("cargo:rustc-link-search=native=../../apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-gpu-1.19.2/lib");
+    println!("cargo:rustc-link-search=native=../../apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-1.19.2/lib");
 }

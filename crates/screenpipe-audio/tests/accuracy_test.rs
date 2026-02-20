@@ -102,6 +102,7 @@ async fn test_transcription_accuracy() {
                 sample_rate: 44100, // hardcoded based on test data sample rate
                 channels: 1,
                 device: Arc::new(default_input_device().unwrap()),
+                capture_timestamp: 0,
             };
 
             let audio_data = if audio_input.sample_rate != SAMPLE_RATE {
@@ -119,7 +120,7 @@ async fn test_transcription_accuracy() {
                 audio_input.data.as_ref().to_vec()
             };
 
-            let (mut segments, _) = prepare_segments(
+            let (mut segments, _, _) = prepare_segments(
                 &audio_data,
                 vad_engine.clone(),
                 &segmentation_model_path,
@@ -130,6 +131,10 @@ async fn test_transcription_accuracy() {
             .await
             .unwrap();
 
+            let mut whisper_state = whisper_context
+                .create_state()
+                .expect("failed to create whisper state");
+
             let mut transcription = String::new();
             while let Some(segment) = segments.recv().await {
                 let transcript = stt(
@@ -139,7 +144,7 @@ async fn test_transcription_accuracy() {
                     Arc::new(AudioTranscriptionEngine::WhisperLargeV3Turbo),
                     None,
                     vec![Language::English],
-                    whisper_context.clone(),
+                    &mut whisper_state,
                 )
                 .await
                 .unwrap();

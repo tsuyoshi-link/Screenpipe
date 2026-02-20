@@ -6,7 +6,7 @@
 //!
 //! All routes expect [`AppState`] to contain a `pipe_manager` field.
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::Json;
 use screenpipe_core::pipes::PipeManager;
@@ -39,13 +39,22 @@ pub struct ConfigUpdateRequest {
     pub config: HashMap<String, Value>,
 }
 
+#[derive(Deserialize)]
+pub struct ExecutionsQuery {
+    pub limit: Option<i32>,
+}
+
 // ---------------------------------------------------------------------------
 // Handlers
 // ---------------------------------------------------------------------------
 
 /// GET /pipes — list all pipes with status.
+/// Re-scans disk so pipes installed externally (e.g. via CLI) are picked up.
 pub async fn list_pipes(State(pm): State<SharedPipeManager>) -> Json<Value> {
     let mgr = pm.lock().await;
+    if let Err(e) = mgr.reload_pipes().await {
+        tracing::warn!("failed to reload pipes from disk: {}", e);
+    }
     let pipes = mgr.list_pipes().await;
     Json(json!({ "data": pipes }))
 }
@@ -73,18 +82,29 @@ pub async fn enable_pipe(
 }
 
 /// POST /pipes/:id/run — trigger a manual pipe run.
+/// Uses start_pipe_background to avoid holding the PipeManager mutex for the
+/// entire execution duration, which would block stop/list/other API calls.
 pub async fn run_pipe_now(
     State(pm): State<SharedPipeManager>,
     Path(id): Path<String>,
 ) -> Json<Value> {
     let mgr = pm.lock().await;
-    match mgr.run_pipe(&id).await {
-        Ok(log) => Json(json!({ "data": log })),
+    match mgr.start_pipe_background(&id).await {
+        Ok(()) => Json(json!({ "success": true })),
         Err(e) => Json(json!({ "error": e.to_string() })),
     }
 }
 
-/// GET /pipes/:id/logs — recent run logs.
+/// POST /pipes/:id/stop — stop a running pipe.
+pub async fn stop_pipe(State(pm): State<SharedPipeManager>, Path(id): Path<String>) -> Json<Value> {
+    let mgr = pm.lock().await;
+    match mgr.stop_pipe(&id).await {
+        Ok(()) => Json(json!({ "success": true })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
+}
+
+/// GET /pipes/:id/logs — recent run logs (in-memory).
 pub async fn get_pipe_logs(
     State(pm): State<SharedPipeManager>,
     Path(id): Path<String>,
@@ -92,6 +112,20 @@ pub async fn get_pipe_logs(
     let mgr = pm.lock().await;
     let logs = mgr.get_logs(&id).await;
     Json(json!({ "data": logs }))
+}
+
+/// GET /pipes/:id/executions — execution history from DB.
+pub async fn get_pipe_executions(
+    State(pm): State<SharedPipeManager>,
+    Path(id): Path<String>,
+    Query(query): Query<ExecutionsQuery>,
+) -> Json<Value> {
+    let mgr = pm.lock().await;
+    let limit = query.limit.unwrap_or(20).min(100);
+    match mgr.get_executions(&id, limit).await {
+        Ok(executions) => Json(json!({ "data": executions })),
+        Err(e) => Json(json!({ "error": e.to_string() })),
+    }
 }
 
 /// POST /pipes/:id/config — update pipe config fields.

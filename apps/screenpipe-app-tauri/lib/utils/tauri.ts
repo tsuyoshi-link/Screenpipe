@@ -139,6 +139,32 @@ async showWindow(window: ShowRewindWindow) : Promise<Result<null, string>> {
     else return { status: "error", error: e  as any };
 }
 },
+/**
+ * Open the screenpi.pe login page inside an in-app WebView.
+ * Intercepts the screenpipe:// deep-link redirect so we don't rely on
+ * Safari custom-scheme support (which can silently fail).
+ */
+async openLoginWindow() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("open_login_window") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Re-assert the WKWebView as first responder for the current key panel.
+ * Called from JS on pointer enter / window focus to ensure trackpad pinch
+ * gestures (magnifyWithEvent:) reach the WKWebView for zoom handling.
+ */
+async ensureWebviewFocus() : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("ensure_webview_focus") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
 async closeWindow(window: ShowRewindWindow) : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("close_window", { window }) };
@@ -245,6 +271,29 @@ async registerWindowShortcuts() : Promise<Result<null, string>> {
 async unregisterWindowShortcuts() : Promise<Result<null, string>> {
     try {
     return { status: "ok", data: await TAURI_INVOKE("unregister_window_shortcuts") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Copy a frame image to the system clipboard (native API, works in Tauri webview).
+ * Fetches the frame from the local server and uses arboard for clipboard access.
+ */
+async copyFrameToClipboard(frameId: bigint) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("copy_frame_to_clipboard", { frameId }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Copy a frame deeplink (screenpipe://frame/N) to clipboard. Native API only.
+ */
+async copyDeeplinkToClipboard(frameId: bigint) : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("copy_deeplink_to_clipboard", { frameId }) };
 } catch (e) {
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
@@ -682,6 +731,29 @@ async remindersSetAudioOnly(audioOnly: boolean) : Promise<Result<null, string>> 
     if(e instanceof Error) throw e;
     else return { status: "error", error: e  as any };
 }
+},
+/**
+ * Tauri command: start voice training. Spawns a background task that polls
+ * until audio is transcribed, then assigns the speaker. Returns immediately.
+ */
+async trainVoice(name: string, startTime: string, endTime: string) : Promise<Result<string, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("train_voice", { name, startTime, endTime }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
+ * Return cached suggestions or default idle suggestions if cache is empty.
+ */
+async getCachedSuggestions() : Promise<Result<CachedSuggestions, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("get_cached_suggestions") };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
 }
 }
 
@@ -698,11 +770,12 @@ async remindersSetAudioOnly(audioOnly: boolean) : Promise<Result<null, string>> 
 export type AIPreset = { id: string; prompt: string; provider: AIProviderType; url?: string; model?: string; defaultPreset: boolean; apiKey: string | null; maxContextChars: number }
 export type AIProviderType = "openai" | "native-ollama" | "custom" | "screenpipe-cloud" | "pi"
 export type AudioDeviceInfo = { name: string; isDefault: boolean }
+export type CachedSuggestions = { suggestions: Suggestion[]; generatedAt: string; mode: string; aiGenerated: boolean; tags: string[] }
 export type Credits = { amount: number }
 export type EmbeddedLLM = { enabled: boolean; model: string; port: number }
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key in string]: JsonValue }
 export type LogFile = { name: string; path: string; modified_at: bigint }
-export type MonitorDevice = { id: number; name: string; isDefault: boolean; width: number; height: number }
+export type MonitorDevice = { id: number; stableId: string; name: string; isDefault: boolean; width: number; height: number }
 export type OSPermission = "screenRecording" | "microphone" | "accessibility"
 export type OSPermissionStatus = "notNeeded" | "empty" | "granted" | "denied"
 export type OSPermissionsCheck = { screenRecording: OSPermissionStatus; microphone: OSPermissionStatus; accessibility: OSPermissionStatus }
@@ -795,16 +868,26 @@ analyticsId: string; devMode: boolean; audioTranscriptionEngine: string; ocrEngi
 /**
  * When true, automatically follow system default audio devices
  */
-useSystemDefaultAudio?: boolean; usePiiRemoval: boolean; restartInterval: number; port: number; dataDir: string; disableAudio: boolean; ignoredWindows: string[]; includedWindows: string[]; ignoredUrls?: string[]; fps: number; vadSensitivity: string; analyticsEnabled: boolean; audioChunkDuration: number; useChineseMirror: boolean; languages: string[]; embeddedLLM: EmbeddedLLM; enableBeta: boolean; isFirstTimeUser: boolean; autoStartEnabled: boolean; enableFrameCache: boolean; platform: string; disabledShortcuts: string[]; user: User; showScreenpipeShortcut: string; startRecordingShortcut: string; stopRecordingShortcut: string; startAudioShortcut: string; stopAudioShortcut: string; showChatShortcut: string; searchShortcut: string; enableRealtimeAudioTranscription: boolean; realtimeAudioTranscriptionEngine: string; disableVision: boolean; useAllMonitors: boolean; adaptiveFps?: boolean; enableRealtimeVision: boolean; showShortcutOverlay?: boolean; 
+useSystemDefaultAudio?: boolean; usePiiRemoval: boolean; port: number; dataDir: string; disableAudio: boolean; ignoredWindows: string[]; includedWindows: string[]; ignoredUrls?: string[]; fps: number; vadSensitivity: string; analyticsEnabled: boolean; audioChunkDuration: number; useChineseMirror: boolean; languages: string[]; embeddedLLM: EmbeddedLLM; autoStartEnabled: boolean; platform: string; disabledShortcuts: string[]; user: User; showScreenpipeShortcut: string; startRecordingShortcut: string; stopRecordingShortcut: string; startAudioShortcut: string; stopAudioShortcut: string; showChatShortcut: string; searchShortcut: string; realtimeAudioTranscriptionEngine: string; disableVision: boolean; 
+/**
+ * When true, screen capture continues but OCR text extraction is skipped.
+ * Reduces CPU usage significantly while still recording video.
+ */
+disableOcr?: boolean; useAllMonitors: boolean; adaptiveFps?: boolean; showShortcutOverlay?: boolean; 
 /**
  * Unique device ID for AI usage tracking (generated on first launch)
  */
 deviceId?: string; 
 /**
- * Enable UI event capture (keyboard, mouse, clipboard).
- * Requires accessibility and input monitoring permissions on macOS.
+ * Enable input event capture (keyboard, mouse, clipboard).
+ * Requires input monitoring permission on macOS.
  */
-enableUiEvents?: boolean; 
+enableInputCapture?: boolean; 
+/**
+ * Enable accessibility text capture (AX tree walker).
+ * Requires accessibility permission on macOS.
+ */
+enableAccessibility?: boolean; 
 /**
  * Auto-install updates and restart when a new version is available.
  * When disabled, users must click "update now" in the tray menu.
@@ -827,6 +910,7 @@ showOverlayInScreenRecording?: boolean;
  */
 videoQuality?: string }
 export type ShowRewindWindow = "Main" | { Settings: { page: string | null } } | { Search: { query: string | null } } | "Onboarding" | "Chat" | "PermissionRecovery"
+export type Suggestion = { text: string }
 /**
  * Sync configuration.
  */

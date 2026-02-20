@@ -9,6 +9,8 @@ Search the user's locally-recorded screen and audio data. Screenpipe continuousl
 
 The API runs at `http://localhost:3030`.
 
+Full API reference (60+ endpoints): https://docs.screenpi.pe/llms-full.txt
+
 ## Search API
 
 ```bash
@@ -20,7 +22,7 @@ curl "http://localhost:3030/search?q=QUERY&content_type=all&limit=10&start_time=
 | Parameter | Type | Required | Description |
 |-----------|------|----------|-------------|
 | `q` | string | No | Search keywords. Be specific. |
-| `content_type` | string | No | `all` (default), `ocr`, `audio`, `vision`, `input` |
+| `content_type` | string | No | `all` (default), `ocr`, `audio`, `input`, `accessibility` |
 | `limit` | integer | No | Max results 1-20. Default: 10 |
 | `offset` | integer | No | Pagination offset. Default: 0 |
 | `start_time` | ISO 8601 | **Yes** | Start of time range. ALWAYS include this. |
@@ -32,10 +34,11 @@ curl "http://localhost:3030/search?q=QUERY&content_type=all&limit=10&start_time=
 
 ### Content Types
 
-- `vision` or `ocr` — Screen text captured via OCR
+- `ocr` — Screen text captured via OCR
 - `audio` — Audio transcriptions (meetings, voice)
 - `input` — UI events: clicks, keystrokes, clipboard, app switches
-- `all` — Everything (default)
+- `accessibility` — Accessibility tree text
+- `all` — OCR + Audio + Accessibility (default)
 
 ### CRITICAL RULES
 
@@ -195,6 +198,38 @@ When referencing video files from search results, show the `file_path` to the us
 
 Do NOT use markdown links or multi-line code blocks for videos.
 
+## Deep Links (Clickable References)
+
+When referencing specific moments from search results, create clickable deep links so the user can jump to that exact moment on their timeline.
+
+**ALWAYS prefer frame-based links** — frame IDs are exact database keys from search results and never break:
+
+```markdown
+[10:30 AM — VS Code](screenpipe://frame/12345)
+```
+
+For audio results (which have no frame_id), fall back to timestamp links:
+
+```markdown
+[meeting at 3pm](screenpipe://timeline?timestamp=2024-01-15T15:00:00Z)
+```
+
+### Rules
+
+1. **Use `screenpipe://frame/{frame_id}`** for OCR results — copy the `frame_id` integer directly from the search result's `content.frame_id` field. Do NOT invent frame IDs.
+2. **Use `screenpipe://timeline?timestamp=ISO8601`** for audio results — copy the exact `timestamp` string from the search result.
+3. **NEVER fabricate IDs or timestamps** — only use values that appear in actual search results.
+4. **Make the link text human-readable** — include the time and app name, e.g. `[2:15 PM — Slack](screenpipe://frame/56789)`.
+5. Include deep links in your responses whenever you reference specific moments. This lets the user verify your claims by clicking through to the actual recording.
+
+### Example
+
+After searching and getting results with `frame_id: 12345` at `timestamp: "2024-01-15T10:30:00Z"` in Chrome:
+
+```markdown
+You were browsing GitHub at [10:30 AM — Chrome](screenpipe://frame/12345) when you reviewed PR #234.
+```
+
 ## Tips
 
 - The user's data is 100% local. You are querying their local machine.
@@ -203,3 +238,18 @@ Do NOT use markdown links or multi-line code blocks for videos.
 - If asked about meetings, use `content_type=audio`.
 - If asked about a specific app, always use the `app_name` filter.
 - Combine multiple searches to build a complete picture (e.g., screen + audio for a meeting).
+- **For aggregation over large datasets**, use raw SQL instead of paginating through search results. The `/search` endpoint returns paginated results (default limit 20), so summarizing thousands of events requires raw SQL. Examples:
+
+```bash
+# Count accessibility events by app (last 24h)
+curl -X POST http://localhost:3030/raw_sql -H "Content-Type: application/json" \
+  -d '{"query": "SELECT app_name, COUNT(*) as count FROM accessibility WHERE timestamp > datetime(\"now\", \"-24 hours\") GROUP BY app_name ORDER BY count DESC"}'
+
+# Count input events by type and app (last 24h)
+curl -X POST http://localhost:3030/raw_sql -H "Content-Type: application/json" \
+  -d '{"query": "SELECT app_name, event_type, COUNT(*) as count FROM ui_events WHERE timestamp > datetime(\"now\", \"-24 hours\") GROUP BY app_name, event_type ORDER BY count DESC"}'
+
+# App usage summary from OCR frames (last 24h)
+curl -X POST http://localhost:3030/raw_sql -H "Content-Type: application/json" \
+  -d '{"query": "SELECT app_name, COUNT(*) as frames FROM frames WHERE timestamp > datetime(\"now\", \"-24 hours\") GROUP BY app_name ORDER BY frames DESC"}'
+```

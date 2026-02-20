@@ -128,6 +128,7 @@ impl ScreenpipeSyncProvider {
         let pool = &self.db.pool;
 
         // Get unsynced frames
+        #[allow(clippy::type_complexity)]
         let frames: Vec<(i64, String, i64, Option<String>, Option<String>, Option<String>, String)> = sqlx::query_as(
             r#"
             SELECT f.id, f.timestamp, f.offset_index, f.app_name, f.window_name, f.browser_url, f.device_name
@@ -337,6 +338,7 @@ impl ScreenpipeSyncProvider {
     ) -> SyncResult<Option<(SyncChunk, String, String)>> {
         let pool = &self.db.pool;
 
+        #[allow(clippy::type_complexity)]
         let records: Vec<(
             i64,
             String,

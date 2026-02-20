@@ -128,8 +128,6 @@ pub struct SettingsStore {
     pub use_system_default_audio: bool,
     #[serde(rename = "usePiiRemoval")]
     pub use_pii_removal: bool,
-    #[serde(rename = "restartInterval")]
-    pub restart_interval: i32,
     #[serde(rename = "port")]
     pub port: u16,
     #[serde(rename = "dataDir")]
@@ -157,14 +155,8 @@ pub struct SettingsStore {
     pub languages: Vec<String>,
     #[serde(rename = "embeddedLLM")]
     pub embedded_llm: EmbeddedLLM,
-    #[serde(rename = "enableBeta")]
-    pub enable_beta: bool,
-    #[serde(rename = "isFirstTimeUser")]
-    pub is_first_time_user: bool,
     #[serde(rename = "autoStartEnabled")]
     pub auto_start_enabled: bool,
-    #[serde(rename = "enableFrameCache")]
-    pub enable_frame_cache: bool,
     #[serde(rename = "platform")]
     pub platform: String,
     #[serde(rename = "disabledShortcuts")]
@@ -185,27 +177,31 @@ pub struct SettingsStore {
     pub show_chat_shortcut: String,
     #[serde(rename = "searchShortcut")]
     pub search_shortcut: String,
-    #[serde(rename = "enableRealtimeAudioTranscription")]
-    pub enable_realtime_audio_transcription: bool,
     #[serde(rename = "realtimeAudioTranscriptionEngine")]
     pub realtime_audio_transcription_engine: String,
     #[serde(rename = "disableVision")]
     pub disable_vision: bool,
+    /// When true, screen capture continues but OCR text extraction is skipped.
+    /// Reduces CPU usage significantly while still recording video.
+    #[serde(rename = "disableOcr", default)]
+    pub disable_ocr: bool,
     #[serde(rename = "useAllMonitors")]
     pub use_all_monitors: bool,
     #[serde(rename = "adaptiveFps", default)]
     pub adaptive_fps: bool,
-    #[serde(rename = "enableRealtimeVision")]
-    pub enable_realtime_vision: bool,
     #[serde(rename = "showShortcutOverlay", default = "default_true")]
     pub show_shortcut_overlay: bool,
     /// Unique device ID for AI usage tracking (generated on first launch)
     #[serde(rename = "deviceId", default = "generate_device_id")]
     pub device_id: String,
-    /// Enable UI event capture (keyboard, mouse, clipboard).
-    /// Requires accessibility and input monitoring permissions on macOS.
-    #[serde(rename = "enableUiEvents", default = "default_true")]
-    pub enable_ui_events: bool,
+    /// Enable input event capture (keyboard, mouse, clipboard).
+    /// Requires input monitoring permission on macOS.
+    #[serde(rename = "enableInputCapture", default)]
+    pub enable_input_capture: bool,
+    /// Enable accessibility text capture (AX tree walker).
+    /// Requires accessibility permission on macOS.
+    #[serde(rename = "enableAccessibility", alias = "enableUiEvents", default = "default_true")]
+    pub enable_accessibility: bool,
     /// Auto-install updates and restart when a new version is available.
     /// When disabled, users must click "update now" in the tray menu.
     #[serde(rename = "autoUpdate", default = "default_true")]
@@ -365,7 +361,7 @@ impl Default for EmbeddedLLM {
     fn default() -> Self {
         Self {
             enabled: false,
-            model: "llama3.2:1b-instruct-q4_K_M".to_string(),
+            model: "ministral-3:latest".to_string(),
             port: 11434,
         }
     }
@@ -457,7 +453,6 @@ impl Default for SettingsStore {
             audio_devices: vec!["default".to_string()],
             use_system_default_audio: true,
             use_pii_removal: true,
-            restart_interval: 0,
             port: 3030,
             data_dir: "default".to_string(),
             disable_audio: false,
@@ -472,10 +467,7 @@ impl Default for SettingsStore {
             use_chinese_mirror: false,
             languages: vec![],
             embedded_llm: EmbeddedLLM::default(),
-            enable_beta: false,
-            is_first_time_user: true,
             auto_start_enabled: true,
-            enable_frame_cache: true,
             platform: "unknown".to_string(),
             disabled_shortcuts: vec![],
             user: User {
@@ -518,15 +510,15 @@ impl Default for SettingsStore {
             search_shortcut: "Alt+K".to_string(),
             #[cfg(not(target_os = "windows"))]
             search_shortcut: "Control+Super+K".to_string(),
-            enable_realtime_audio_transcription: false,
             realtime_audio_transcription_engine: "deepgram".to_string(),
             disable_vision: false,
+            disable_ocr: false,
             use_all_monitors: true,  // Match CLI default - dynamic monitor detection
-            enable_realtime_vision: true,
             show_shortcut_overlay: true,
             device_id: uuid::Uuid::new_v4().to_string(),
             adaptive_fps: false,
-            enable_ui_events: true,
+            enable_input_capture: false,
+            enable_accessibility: false,
             auto_update: true,
             overlay_mode: "fullscreen".to_string(),
             show_overlay_in_screen_recording: false,
@@ -537,13 +529,29 @@ impl Default for SettingsStore {
 }
 
 impl SettingsStore {
+    /// Remove legacy field aliases that conflict with their renamed counterparts.
+    /// e.g. `enableUiEvents` was renamed to `enableAccessibility` — if both exist
+    /// in the stored JSON, serde rejects it as a duplicate field.
+    fn sanitize_legacy_fields(mut val: Value) -> Value {
+        if let Some(obj) = val.as_object_mut() {
+            if obj.contains_key("enableAccessibility") {
+                obj.remove("enableUiEvents");
+            } else if let Some(v) = obj.remove("enableUiEvents") {
+                obj.insert("enableAccessibility".to_string(), v);
+            }
+        }
+        val
+    }
+
     pub fn get(app: &AppHandle) -> Result<Option<Self>, String> {
         let store = get_store(app, None).map_err(|e| format!("Failed to get store: {}", e))?;
 
         match store.is_empty() {
             true => Ok(None),
             false => {
-                let settings = serde_json::from_value(store.get("settings").unwrap_or(Value::Null));
+                let raw = store.get("settings").unwrap_or(Value::Null);
+                let sanitized = Self::sanitize_legacy_fields(raw);
+                let settings = serde_json::from_value(sanitized);
                 match settings {
                     Ok(settings) => Ok(settings),
                     Err(e) => {
@@ -555,16 +563,79 @@ impl SettingsStore {
         }
     }
 
-    #[allow(dead_code)]
-    pub fn update(app: &AppHandle, update: impl FnOnce(&mut SettingsStore)) -> Result<(), String> {
-        let Ok(store) = get_store(app, None) else {
-            return Err("Failed to get store".to_string());
-        };
+    /// Build a unified `RecordingConfig` from this settings store.
+    pub fn to_recording_config(&self, data_dir: std::path::PathBuf) -> screenpipe_server::RecordingConfig {
+        use screenpipe_audio::audio_manager::builder::TranscriptionMode;
+        use screenpipe_audio::core::engine::AudioTranscriptionEngine;
+        use screenpipe_audio::vad::VadSensitivity;
+        use screenpipe_vision::OcrEngine;
 
-        let mut settings = Self::get(app)?.unwrap();
-        update(&mut settings);
-        store.set("settings", json!(settings));
-        Ok(())
+        let audio_engine_str = self.resolve_audio_engine();
+
+        screenpipe_server::RecordingConfig {
+            fps: if self.fps > 0.0 { self.fps as f64 } else { 1.0 },
+            adaptive_fps: self.adaptive_fps,
+            audio_chunk_duration: self.audio_chunk_duration as u64,
+            port: self.port,
+            data_dir,
+            disable_audio: self.disable_audio,
+            disable_vision: self.disable_vision,
+            disable_ocr: self.disable_ocr,
+            use_pii_removal: self.use_pii_removal,
+            enable_input_capture: self.enable_input_capture,
+            enable_accessibility: self.enable_accessibility,
+            audio_transcription_engine: audio_engine_str.parse()
+                .unwrap_or(AudioTranscriptionEngine::WhisperLargeV3Turbo),
+            ocr_engine: self.ocr_engine.parse()
+                .unwrap_or(OcrEngine::platform_default()),
+            vad_sensitivity: self.vad_sensitivity.parse()
+                .unwrap_or(VadSensitivity::High),
+            transcription_mode: match self.extra.get("transcriptionMode").and_then(|v| v.as_str()) {
+                Some("smart") => TranscriptionMode::Smart,
+                _ => TranscriptionMode::Realtime,
+            },
+            audio_devices: self.audio_devices.clone(),
+            use_system_default_audio: self.use_system_default_audio,
+            monitor_ids: self.monitor_ids.clone(),
+            use_all_monitors: self.use_all_monitors,
+            ignored_windows: self.ignored_windows.clone(),
+            included_windows: self.included_windows.clone(),
+            ignored_urls: self.ignored_urls.clone(),
+            languages: self.languages.iter()
+                .filter(|s| s != &"default")
+                .filter_map(|s| s.parse().ok())
+                .collect(),
+            deepgram_api_key: if self.deepgram_api_key.is_empty()
+                || self.deepgram_api_key == "default"
+            {
+                None
+            } else {
+                Some(self.deepgram_api_key.clone())
+            },
+            user_id: self.user.id.as_ref().filter(|id| !id.is_empty()).cloned(),
+            video_quality: self.video_quality.clone(),
+            use_chinese_mirror: self.use_chinese_mirror,
+            analytics_enabled: self.analytics_enabled,
+            analytics_id: self.analytics_id.clone(),
+        }
+    }
+
+    fn resolve_audio_engine(&self) -> String {
+        let engine = self.audio_transcription_engine.clone();
+        let has_user_id = self.user.id.as_ref().map_or(false, |id| !id.is_empty());
+        let has_deepgram_key = !self.deepgram_api_key.is_empty()
+            && self.deepgram_api_key != "default";
+        match engine.as_str() {
+            "screenpipe-cloud" if !has_user_id => {
+                tracing::warn!("screenpipe-cloud selected but user not logged in, falling back to whisper-large-v3-turbo");
+                "whisper-large-v3-turbo".to_string()
+            }
+            "deepgram" if !has_deepgram_key => {
+                tracing::warn!("deepgram selected but no API key configured, falling back to whisper-large-v3-turbo");
+                "whisper-large-v3-turbo".to_string()
+            }
+            _ => engine,
+        }
     }
 
     pub fn save(&self,app: &AppHandle) -> Result<(), String> {

@@ -120,30 +120,37 @@ where
     Fut: std::future::Future<Output = Result<T>>,
 {
     let mut retries = 0;
-    let mut delay_ms = 10; // Start with 10ms delay
+    let mut delay_ms = 500; // Start with 500ms delay to let Metal/GPU settle
 
     loop {
         match operation().await {
             Ok(value) => return Ok(value),
             Err(e) => {
                 if retries >= max_retries {
+                    tracing::error!(
+                        "ScreenCaptureKit failed after {} retries: {}",
+                        max_retries,
+                        e
+                    );
                     return Err(anyhow!("Max retries reached: {}", e));
                 }
 
                 // Add some jitter to prevent synchronized retries
                 use rand::{rng, Rng};
-                let jitter = rng().random_range(0..=10) as u64;
+                let jitter = rng().random_range(0..=50) as u64;
                 let delay = std::time::Duration::from_millis(delay_ms + jitter);
 
                 tracing::warn!(
-                    "ScreenCaptureKit host error, retrying in {}ms: {}",
+                    "ScreenCaptureKit host error (attempt {}/{}), retrying in {}ms: {}",
+                    retries + 1,
+                    max_retries,
                     delay_ms + jitter,
                     e
                 );
                 tokio::time::sleep(delay).await;
 
                 retries += 1;
-                delay_ms = std::cmp::min(delay_ms * 2, 1000); // Exponential backoff, max 1s
+                delay_ms = std::cmp::min(delay_ms * 2, 3000); // Exponential backoff, max 3s
             }
         }
     }
@@ -152,13 +159,13 @@ where
 /// Gets the ScreenCaptureKit host with retry mechanism
 #[cfg(target_os = "macos")]
 async fn get_screen_capture_host() -> Result<cpal::Host> {
-    // necessary hack because this is unreliable
+    // necessary hack because this is unreliable, especially during Metal/GPU init
     with_retry(
         || async {
             cpal::host_from_id(cpal::HostId::ScreenCaptureKit)
                 .map_err(|e| anyhow!("Failed to get ScreenCaptureKit host: {}", e))
         },
-        3,
+        6,
     )
     .await
 }
@@ -197,8 +204,18 @@ pub async fn get_cpal_device_and_config(
 
         #[cfg(target_os = "macos")]
         if is_output_device {
-            if let Ok(screen_capture_host) = get_screen_capture_host().await {
-                devices = screen_capture_host.input_devices()?;
+            match get_screen_capture_host().await {
+                Ok(screen_capture_host) => {
+                    devices = screen_capture_host.input_devices()?;
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "ScreenCaptureKit unavailable for output device '{}': {} — \
+                         device lookup may fail",
+                        device_name,
+                        e
+                    );
+                }
             }
         }
 
@@ -273,13 +290,22 @@ pub async fn list_audio_devices() -> Result<Vec<AudioDevice>> {
         {
             // !HACK macos is supposed to use special macos feature "display capture"
             // ! see https://github.com/RustAudio/cpal/pull/894
-            if let Ok(screen_capture_host) = get_screen_capture_host().await {
-                for device in screen_capture_host.input_devices()? {
-                    if let Ok(name) = device.name() {
-                        if should_include_output_device(&name) {
-                            devices.push(AudioDevice::new(name, DeviceType::Output));
+            match get_screen_capture_host().await {
+                Ok(screen_capture_host) => {
+                    for device in screen_capture_host.input_devices()? {
+                        if let Ok(name) = device.name() {
+                            if should_include_output_device(&name) {
+                                devices.push(AudioDevice::new(name, DeviceType::Output));
+                            }
                         }
                     }
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "ScreenCaptureKit unavailable when listing audio devices: {} — \
+                         output device list may be incomplete",
+                        e
+                    );
                 }
             }
         }
@@ -440,11 +466,21 @@ pub async fn default_output_device() -> Result<AudioDevice> {
     {
         // ! see https://github.com/RustAudio/cpal/pull/894
         // Try to get device from ScreenCaptureKit first
-        if let Ok(host) = get_screen_capture_host().await {
-            if let Some(device) = host.default_input_device() {
-                if let Ok(name) = device.name() {
-                    return Ok(AudioDevice::new(name, DeviceType::Output));
+        match get_screen_capture_host().await {
+            Ok(host) => {
+                if let Some(device) = host.default_input_device() {
+                    if let Ok(name) = device.name() {
+                        return Ok(AudioDevice::new(name, DeviceType::Output));
+                    }
                 }
+                tracing::warn!("ScreenCaptureKit host available but no default input device found");
+            }
+            Err(e) => {
+                tracing::warn!(
+                    "ScreenCaptureKit unavailable for output audio capture: {} — \
+                     falling back to physical output device (may not capture system audio)",
+                    e
+                );
             }
         }
 
@@ -453,7 +489,12 @@ pub async fn default_output_device() -> Result<AudioDevice> {
         let device = host
             .default_output_device()
             .ok_or_else(|| anyhow!("No default output device found"))?;
-        Ok(AudioDevice::new(device.name()?, DeviceType::Output))
+        let name = device.name()?;
+        tracing::warn!(
+            "using fallback physical output device: '{}' (not ScreenCaptureKit display audio)",
+            name
+        );
+        Ok(AudioDevice::new(name, DeviceType::Output))
     }
 
     // Linux without pulseaudio feature

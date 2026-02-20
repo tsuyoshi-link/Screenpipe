@@ -103,8 +103,12 @@ pub fn clear_frontmost_app() {
 /// This is critical: `make_first_responder(content_view())` steals focus from the
 /// WKWebView, preventing it from receiving trackpad gestures (pinch-to-zoom).
 /// We need to traverse the subview hierarchy to find the actual WKWebView.
+///
+/// Uses dispatch_async to the main queue so the responder assignment runs on the
+/// *next* run-loop tick. This avoids a race where `make_key_window()` defers its
+/// own responder-chain update to the end of the current event, overwriting our call.
 #[cfg(target_os = "macos")]
-unsafe fn make_webview_first_responder(panel: &tauri_nspanel::raw_nspanel::RawNSPanel) {
+pub unsafe fn make_webview_first_responder(panel: &tauri_nspanel::raw_nspanel::RawNSPanel) {
     use objc::{class, msg_send, sel, sel_impl};
     use tauri_nspanel::cocoa::base::{id, nil};
     use tauri_nspanel::cocoa::foundation::NSArray;
@@ -113,12 +117,13 @@ unsafe fn make_webview_first_responder(panel: &tauri_nspanel::raw_nspanel::RawNS
     let wk_class: *const objc::runtime::Class = class!(WKWebView);
 
     // BFS through subview tree to find WKWebView
+    let mut wk_view: id = nil;
     let mut queue: Vec<id> = vec![content_view];
     while let Some(view) = queue.pop() {
         let is_wk: bool = msg_send![view, isKindOfClass: wk_class];
         if is_wk {
-            panel.make_first_responder(Some(view));
-            return;
+            wk_view = view;
+            break;
         }
         let subviews: id = msg_send![view, subviews];
         if subviews != nil {
@@ -131,7 +136,37 @@ unsafe fn make_webview_first_responder(panel: &tauri_nspanel::raw_nspanel::RawNS
     }
 
     // Fallback: if no WKWebView found, use content_view (shouldn't happen)
-    panel.make_first_responder(Some(panel.content_view()));
+    if wk_view == nil {
+        wk_view = content_view;
+    }
+
+    // Set first responder immediately (handles the common case)
+    panel.make_first_responder(Some(wk_view));
+
+    // Also schedule on the next run-loop tick to win the race against any
+    // deferred responder-chain reset triggered by make_key_window().
+    // We use dispatch_async(main_queue) so our call lands after AppKit's
+    // deferred responder chain updates from the current event.
+    let window: id = msg_send![panel.content_view(), window];
+    let panel_id = window as usize;
+    let wk_id = wk_view as usize;
+    extern "C" {
+        // dispatch_get_main_queue() is a C macro, not a real symbol.
+        // The actual global is _dispatch_main_q provided by libSystem.
+        static _dispatch_main_q: std::ffi::c_void;
+        fn dispatch_async_f(queue: *const std::ffi::c_void, context: *mut std::ffi::c_void, work: extern "C" fn(*mut std::ffi::c_void));
+    }
+    struct Ctx { panel_id: usize, wk_id: usize }
+    extern "C" fn set_responder(ctx: *mut std::ffi::c_void) {
+        unsafe {
+            let ctx = Box::from_raw(ctx as *mut Ctx);
+            let window: id = ctx.panel_id as id;
+            let wk: id = ctx.wk_id as id;
+            let _: () = msg_send![window, makeFirstResponder: wk];
+        }
+    }
+    let ctx = Box::into_raw(Box::new(Ctx { panel_id: panel_id, wk_id: wk_id }));
+    dispatch_async_f(&_dispatch_main_q, ctx as *mut std::ffi::c_void, set_responder);
 }
 
 /// Tracks which overlay mode the current Main window was created for.
@@ -348,7 +383,7 @@ impl RewindWindowId {
             RewindWindowId::Settings => (1200.0, 850.0),
             RewindWindowId::Search => (1200.0, 850.0),
             RewindWindowId::Onboarding => (450.0, 500.0),
-            RewindWindowId::Chat => (500.0, 600.0),
+            RewindWindowId::Chat => (600.0, 750.0),
             RewindWindowId::PermissionRecovery => (500.0, 400.0),
         })
     }
@@ -480,10 +515,13 @@ impl ShowRewindWindow {
                         save_frontmost_app();
                         unsafe {
                             let _: () = msg_send![&*panel, setAlphaValue: 1.0f64];
-                            make_webview_first_responder(&panel);
                         }
                         panel.order_front_regardless();
                         panel.make_key_window();
+                        // Set WKWebView as first responder AFTER make_key_window so
+                        // the responder chain update doesn't reset it to content_view.
+                        // This is critical for trackpad pinch-to-zoom (magnifyWithEvent:).
+                        unsafe { make_webview_first_responder(&panel); }
                         // Remove MoveToActiveSpace so panel stays pinned to this Space
                         panel.set_collection_behaviour(
                             NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
@@ -556,10 +594,12 @@ impl ShowRewindWindow {
                         // Restore alpha in case it was set to 0 by focus-loss handler
                         unsafe {
                             let _: () = msg_send![&*panel, setAlphaValue: 1.0f64];
-                            make_webview_first_responder(&panel);
                         }
                         panel.order_front_regardless();
                         panel.make_key_window();
+                        // Set WKWebView as first responder AFTER make_key_window so
+                        // the responder chain update doesn't reset it to content_view.
+                        unsafe { make_webview_first_responder(&panel); }
 
                         // Remove MoveToActiveSpace now that the panel is shown.
                         // This keeps it pinned to THIS Space so it won't follow
@@ -708,9 +748,10 @@ impl ShowRewindWindow {
                                 NSWindowCollectionBehavior::NSWindowCollectionBehaviorMoveToActiveSpace |
                                 NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
                             );
-                            unsafe { make_webview_first_responder(&panel); }
                             panel.order_front_regardless();
                             panel.make_key_window();
+                            // Set WKWebView as first responder AFTER make_key_window
+                            unsafe { make_webview_first_responder(&panel); }
                             // Remove MoveToActiveSpace now that the panel is shown.
                             // Keeps it pinned to THIS Space so it won't follow
                             // three-finger swipes (same pattern as main overlay).
@@ -837,9 +878,10 @@ impl ShowRewindWindow {
                                         NSWindowCollectionBehavior::NSWindowCollectionBehaviorMoveToActiveSpace |
                                         NSWindowCollectionBehavior::NSWindowCollectionBehaviorFullScreenAuxiliary
                                     );
-                                    unsafe { make_webview_first_responder(&panel); }
                                     panel.order_front_regardless();
                                     panel.make_key_window();
+                                    // Set WKWebView as first responder AFTER make_key_window
+                                    unsafe { make_webview_first_responder(&panel); }
                                     let _ = app_for_emit.emit("window-focused", true);
                                 }
                             });
@@ -900,8 +942,12 @@ impl ShowRewindWindow {
                                         if let Ok(panel) = app_clone.get_webview_panel("main-window") {
                                             unsafe {
                                                 let _: () = msg_send![&*panel, setAlphaValue: 1.0f64];
-                                                make_webview_first_responder(&panel);
                                             }
+                                            // Ensure panel is key window before setting first
+                                            // responder, otherwise magnifyWithEvent: won't
+                                            // reach the WKWebView (pinch-to-zoom breaks).
+                                            panel.make_key_window();
+                                            unsafe { make_webview_first_responder(&panel); }
                                         }
                                     }
                                     // Re-register window shortcuts on focus gain
@@ -1202,8 +1248,12 @@ impl ShowRewindWindow {
                                     if let Ok(panel) = app_clone.get_webview_panel(&lbl) {
                                         unsafe {
                                             let _: () = msg_send![&*panel, setAlphaValue: 1.0f64];
-                                            make_webview_first_responder(&panel);
                                         }
+                                        // Ensure panel is key window before setting first
+                                        // responder, otherwise magnifyWithEvent: won't
+                                        // reach the WKWebView (pinch-to-zoom breaks).
+                                        panel.make_key_window();
+                                        unsafe { make_webview_first_responder(&panel); }
                                     }
                                 }
                                 // Re-register window-specific shortcuts on focus gain
@@ -1294,8 +1344,8 @@ impl ShowRewindWindow {
                     // NOTE: Do NOT switch to Accessory mode here — it hides dock icon
                     // and tray on notched MacBooks. NSPanel handles fullscreen visibility.
                     let builder = self.window_builder(app, "/chat")
-                        .inner_size(500.0, 650.0)
-                        .min_inner_size(400.0, 500.0)
+                        .inner_size(650.0, 800.0)
+                        .min_inner_size(500.0, 600.0)
                         .focused(false)
                         .visible(false)
                         .always_on_top(true)
@@ -1360,8 +1410,8 @@ impl ShowRewindWindow {
                 #[cfg(not(target_os = "macos"))]
                 let window = {
                     let builder = self.window_builder(app, "/chat")
-                        .inner_size(500.0, 650.0)
-                        .min_inner_size(400.0, 500.0)
+                        .inner_size(650.0, 800.0)
+                        .min_inner_size(500.0, 600.0)
                         .focused(true)
                         .always_on_top(true);
                     builder.build()?

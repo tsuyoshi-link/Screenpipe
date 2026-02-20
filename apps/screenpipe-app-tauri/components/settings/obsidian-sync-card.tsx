@@ -141,12 +141,11 @@ interface SyncHistoryEntry {
 
 const userTimezone = Intl.DateTimeFormat().resolvedOptions().timeZone; // e.g. "America/New_York"
 
-const DEFAULT_CUSTOM_PROMPT = `use timezone: ${userTimezone}
+const DEFAULT_CUSTOM_PROMPT = `timezone: ${userTimezone}
+focus areas: work, coding, meetings
+my projects: [[Project A]], [[Project B]]
 embed video clips for meetings using absolute file paths
-include timeline deep links for key moments
-use [[Name]] wiki-links for people and projects
-one file per day, daily note obsidian style
-be concise, capture reminders, todos, goals`;
+tag people I talk to frequently: [[Alice]], [[Bob]]`;
 
 const DEFAULT_SETTINGS: ObsidianSyncSettings = {
   enabled: false,
@@ -595,8 +594,8 @@ export function ObsidianSyncCard() {
                 size="sm"
                 className="text-xs gap-1.5 h-7 mb-2"
                 onClick={async () => {
-                  const { open } = await import("@tauri-apps/plugin-shell");
-                  await open("https://screenpi.pe/login");
+                  const { openUrl } = await import("@tauri-apps/plugin-opener");
+                  await openUrl("https://screenpi.pe/login");
                 }}
               >
                 <AlertCircle className="h-3 w-3" />
@@ -725,8 +724,8 @@ export function ObsidianSyncCard() {
                   size="sm"
                   className="text-xs h-6 gap-1"
                   onClick={async () => {
-                    const { open } = await import("@tauri-apps/plugin-shell");
-                    await open(isLoggedIn ? "https://screenpi.pe/pricing" : "https://screenpi.pe/login");
+                    const { openUrl } = await import("@tauri-apps/plugin-opener");
+                    await openUrl(isLoggedIn ? "https://screenpi.pe/pricing" : "https://screenpi.pe/login");
                   }}
                 >
                   {isLoggedIn ? "upgrade" : "sign in"}

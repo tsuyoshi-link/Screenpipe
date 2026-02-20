@@ -5,7 +5,9 @@ import { useState, useRef, useMemo, useCallback, useEffect } from "react";
 import { AudioData, StreamTimeSeriesResponse, TimeRange } from "@/components/rewind/timeline";
 import { Button } from "@/components/ui/button";
 import { Card } from "@/components/ui/card";
-import { Play, Pause, Volume2, GripHorizontal, X, MessageSquare, Layers, Users, Copy, Check } from "lucide-react";
+import { Play, Pause, Volume2, GripHorizontal, X, MessageSquare, Layers, Users, Copy, Check, BotMessageSquare } from "lucide-react";
+import { commands } from "@/lib/utils/tauri";
+import { emit } from "@tauri-apps/api/event";
 import { VideoComponent } from "@/components/rewind/video";
 import { SpeakerAssignPopover } from "@/components/speaker-assign-popover";
 import {
@@ -14,7 +16,8 @@ import {
 	ParticipantsSummary,
 } from "@/components/conversation-bubble";
 import { cn } from "@/lib/utils";
-import { Meeting } from "@/lib/hooks/use-meetings";
+import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
+import { Meeting, deduplicateAudioItems } from "@/lib/hooks/use-meetings";
 
 interface AudioGroup {
 	deviceName: string;
@@ -112,8 +115,8 @@ export function AudioTranscript({
 	}, [activeMeetingId]);
 
 	const [position, setPosition] = useState(() => ({
-		x: window.innerWidth - 380,
-		y: 100,
+		x: Math.max(0, Math.min(window.innerWidth - 380, window.innerWidth - 360)),
+		y: Math.max(0, Math.min(100, window.innerHeight - 500)),
 	}));
 	const [isDragging, setIsDragging] = useState(false);
 	const [dragOffset, setDragOffset] = useState({ x: 0, y: 0 });
@@ -228,12 +231,15 @@ export function AudioTranscript({
 		// Sort by timestamp
 		allAudio.sort((a, b) => a.timestamp.getTime() - b.timestamp.getTime());
 
+		// Deduplicate overlapping input/output entries (same speech captured by mic + display)
+		const dedupedAudio = deduplicateAudioItems(allAudio);
+
 		// Build conversation items with grouping and gap detection
 		const items: ConversationItem[] = [];
 		let lastSpeakerId: number | undefined = undefined;
 		let lastTimestamp: Date | null = null;
 
-		allAudio.forEach((audio) => {
+		dedupedAudio.forEach((audio) => {
 			const { speakerId } = getSpeakerInfo(audio);
 			const isFirstInGroup = speakerId !== lastSpeakerId;
 
@@ -263,7 +269,7 @@ export function AudioTranscript({
 
 		// Compute participants
 		const participantMap = new Map<number, { name: string; duration: number }>();
-		allAudio.forEach((audio) => {
+		dedupedAudio.forEach((audio) => {
 			const { speakerId, speakerName } = getSpeakerInfo(audio);
 			const id = speakerId ?? -1;
 			const existing = participantMap.get(id);
@@ -285,10 +291,10 @@ export function AudioTranscript({
 
 		// Time range
 		const timeRange =
-			allAudio.length > 0
+			dedupedAudio.length > 0
 				? {
-						start: allAudio[0].timestamp,
-						end: allAudio[allAudio.length - 1].timestamp,
+						start: dedupedAudio[0].timestamp,
+						end: dedupedAudio[dedupedAudio.length - 1].timestamp,
 				  }
 				: null;
 
@@ -307,12 +313,15 @@ export function AudioTranscript({
 			})
 		);
 
+		// Deduplicate overlapping input/output entries
+		const dedupedAudio = deduplicateAudioItems(allAudio);
+
 		// Build conversation items
 		const items: ConversationItem[] = [];
 		let lastSpeakerId: number | undefined = undefined;
 		let lastTimestamp: Date | null = null;
 
-		allAudio.forEach((audio) => {
+		dedupedAudio.forEach((audio) => {
 			const { speakerId } = getSpeakerInfo(audio);
 			const isFirstInGroup = speakerId !== lastSpeakerId;
 
@@ -371,6 +380,32 @@ export function AudioTranscript({
 		});
 	}, [tabMode, meetingConversationData, conversationData, getSpeakerInfo]);
 
+	const handleSendToChat = useCallback(async () => {
+		const data = tabMode === "meeting" ? meetingConversationData : conversationData;
+		if (!data.items.length) return;
+
+		const lines = data.items.map((item) => {
+			const { speakerName } = getSpeakerInfo(item.audio);
+			const time = item.audio.timestamp.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", second: "2-digit" });
+			const name = speakerName || (item.audio.is_input ? "me" : "speaker");
+			return `[${time}] ${name}: ${item.audio.transcription || "(no transcription)"}`;
+		});
+
+		const timeRange = data.timeRange
+			? `${data.timeRange.start.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })} – ${data.timeRange.end.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
+			: "";
+
+		const label = tabMode === "meeting"
+			? `meeting transcript (${timeRange})`
+			: `nearby audio (${timeRange})`;
+
+		const context = `here is my ${label}:\n\n${lines.join("\n")}`;
+
+		await commands.showWindow("Chat");
+		await new Promise((r) => setTimeout(r, 200));
+		await emit("chat-prefill", { context, prompt: "" });
+	}, [tabMode, meetingConversationData, conversationData, getSpeakerInfo]);
+
 	// Auto-switch to thread view if multiple speakers detected
 	const hasMultipleSpeakers = conversationData.participants.length > 1;
 
@@ -381,13 +416,15 @@ export function AudioTranscript({
 	const handlePanelMouseMove = useCallback(
 		(e: React.MouseEvent) => {
 			if (isDragging) {
+				const newX = e.clientX - dragOffset.x;
+				const newY = e.clientY - dragOffset.y;
 				setPosition({
-					x: e.clientX - dragOffset.x,
-					y: e.clientY - dragOffset.y,
+					x: Math.max(0, Math.min(newX, window.innerWidth - windowSize.width)),
+					y: Math.max(0, Math.min(newY, window.innerHeight - windowSize.height)),
 				});
 			}
 		},
-		[isDragging, dragOffset]
+		[isDragging, dragOffset, windowSize]
 	);
 
 	const handlePlay = useCallback((audioPath: string) => {
@@ -416,8 +453,10 @@ export function AudioTranscript({
 		const startHeight = windowSize.height;
 
 		const handleMouseMove = (moveEvent: MouseEvent) => {
-			const newWidth = Math.max(280, startWidth + moveEvent.clientX - startX);
-			const newHeight = Math.max(200, startHeight + moveEvent.clientY - startY);
+			const maxWidth = window.innerWidth - position.x;
+			const maxHeight = window.innerHeight - position.y;
+			const newWidth = Math.max(280, Math.min(startWidth + moveEvent.clientX - startX, maxWidth));
+			const newHeight = Math.max(200, Math.min(startHeight + moveEvent.clientY - startY, maxHeight));
 			setWindowSize({ width: newWidth, height: newHeight });
 		};
 
@@ -457,85 +496,88 @@ export function AudioTranscript({
 				onMouseUp={handlePanelMouseUp}
 				onMouseLeave={handlePanelMouseUp}
 			>
-				<div className="flex items-center justify-between gap-2">
-					<div className="flex items-center gap-2 text-xs text-muted-foreground">
-						<GripHorizontal className="w-4 h-4" />
-						<span>
+				<div className="flex items-center justify-between gap-1 min-w-0">
+					<div className="flex items-center gap-1.5 text-xs text-muted-foreground shrink-0">
+						<GripHorizontal className="w-4 h-4 shrink-0" />
+						<span className="truncate">
 							{tabMode === "meeting" && activeMeeting
-								? `meeting · ${activeMeeting.audioEntries.length} segments · ${activeMeeting.startTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}–${activeMeeting.endTime.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })}`
-								: "audio transcripts"}
+								? `meeting · ${activeMeeting.audioEntries.length} seg`
+								: "audio"}
 						</span>
 					</div>
 
-					<div className="flex items-center gap-1">
+					<TooltipProvider delayDuration={300}>
+					<div className="flex items-center gap-0.5 shrink-0">
 						{tabMode === "meeting" ? (
-							<Button
-								variant="ghost"
-								size="sm"
-								className="h-6 px-2 text-xs"
-								onClick={() => setTabMode("nearby")}
-								title="Back to nearby view"
-							>
-								← nearby
-							</Button>
+							<Tooltip>
+								<TooltipTrigger asChild>
+									<Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => setTabMode("nearby")}>
+										←
+									</Button>
+								</TooltipTrigger>
+								<TooltipContent side="bottom"><p>nearby view</p></TooltipContent>
+							</Tooltip>
 						) : (
 							<>
-								{/* Device/thread toggle */}
-								<Button
-									variant={viewMode === "device" ? "secondary" : "ghost"}
-									size="sm"
-									className="h-6 px-2 text-xs gap-1"
-									onClick={() => setViewMode("device")}
-									title="Group by device"
-								>
-									<Layers className="h-3 w-3" />
-								</Button>
-								<Button
-									variant={viewMode === "thread" ? "secondary" : "ghost"}
-									size="sm"
-									className="h-6 px-2 text-xs gap-1"
-									onClick={() => setViewMode("thread")}
-									title="Conversation thread"
-								>
-									<MessageSquare className="h-3 w-3" />
-								</Button>
-								{/* Show "full meeting" button when a meeting is detected */}
+								<Tooltip>
+									<TooltipTrigger asChild>
+										<Button variant={viewMode === "device" ? "secondary" : "ghost"} size="sm" className="h-6 w-6 p-0" onClick={() => setViewMode("device")}>
+											<Layers className="h-3 w-3" />
+										</Button>
+									</TooltipTrigger>
+									<TooltipContent side="bottom"><p>by device</p></TooltipContent>
+								</Tooltip>
+								<Tooltip>
+									<TooltipTrigger asChild>
+										<Button variant={viewMode === "thread" ? "secondary" : "ghost"} size="sm" className="h-6 w-6 p-0" onClick={() => setViewMode("thread")}>
+											<MessageSquare className="h-3 w-3" />
+										</Button>
+									</TooltipTrigger>
+									<TooltipContent side="bottom"><p>conversation</p></TooltipContent>
+								</Tooltip>
 								{activeMeeting && (
 									<>
 										<div className="w-px h-4 bg-border mx-0.5" />
-										<Button
-											variant="ghost"
-											size="sm"
-											className="h-6 px-2 text-xs gap-1"
-											onClick={() => setTabMode("meeting")}
-											title="View full meeting transcript"
-										>
-											<Users className="h-3 w-3" />
-											full meeting
-										</Button>
+										<Tooltip>
+											<TooltipTrigger asChild>
+												<Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={() => setTabMode("meeting")}>
+													<Users className="h-3 w-3" />
+												</Button>
+											</TooltipTrigger>
+											<TooltipContent side="bottom"><p>full meeting</p></TooltipContent>
+										</Tooltip>
 									</>
 								)}
 							</>
 						)}
 
-						<Button
-							variant="ghost"
-							size="sm"
-							className="h-6 w-6 p-0 ml-1"
-							onClick={handleCopyTranscript}
-							title="copy transcript"
-						>
-							{copied ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
-						</Button>
-						<Button
-							variant="ghost"
-							size="sm"
-							className="h-6 w-6 p-0"
-							onClick={handleClose}
-						>
-							<X className="h-3 w-3" />
-						</Button>
+						<div className="w-px h-4 bg-border mx-0.5" />
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={handleSendToChat}>
+									<BotMessageSquare className="h-3 w-3" />
+								</Button>
+							</TooltipTrigger>
+							<TooltipContent side="bottom"><p>ask ai</p></TooltipContent>
+						</Tooltip>
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={handleCopyTranscript}>
+									{copied ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3" />}
+								</Button>
+							</TooltipTrigger>
+							<TooltipContent side="bottom"><p>{copied ? "copied!" : "copy"}</p></TooltipContent>
+						</Tooltip>
+						<Tooltip>
+							<TooltipTrigger asChild>
+								<Button variant="ghost" size="sm" className="h-6 w-6 p-0" onClick={handleClose}>
+									<X className="h-3 w-3" />
+								</Button>
+							</TooltipTrigger>
+							<TooltipContent side="bottom"><p>close</p></TooltipContent>
+						</Tooltip>
 					</div>
+					</TooltipProvider>
 				</div>
 			</div>
 

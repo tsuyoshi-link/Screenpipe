@@ -4,7 +4,7 @@
 
 use crate::activity_feed::{ActivityFeed, ActivityKind};
 use crate::config::UiCaptureConfig;
-use crate::events::{EventData, UiEvent};
+use crate::events::{ElementContext, EventData, UiEvent, WindowTreeSnapshot};
 use anyhow::Result;
 use chrono::Utc;
 use crossbeam_channel::{bounded, Receiver, Sender};
@@ -15,6 +15,8 @@ use std::sync::Arc;
 use std::thread;
 use std::time::Instant;
 use tracing::{debug, error};
+
+use super::windows_uia::{self, ClickElementRequest};
 
 use windows::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
@@ -52,6 +54,7 @@ pub struct UiRecorder {
 pub struct RecordingHandle {
     stop: Arc<AtomicBool>,
     events_rx: Receiver<UiEvent>,
+    tree_rx: Receiver<WindowTreeSnapshot>,
     threads: Vec<thread::JoinHandle<()>>,
 }
 
@@ -73,6 +76,11 @@ impl RecordingHandle {
         &self.events_rx
     }
 
+    /// Receiver for accessibility tree snapshots
+    pub fn tree_receiver(&self) -> &Receiver<WindowTreeSnapshot> {
+        &self.tree_rx
+    }
+
     pub fn try_recv(&self) -> Option<UiEvent> {
         self.events_rx.try_recv().ok()
     }
@@ -83,6 +91,11 @@ impl RecordingHandle {
 
     pub fn recv_timeout(&self, timeout: std::time::Duration) -> Option<UiEvent> {
         self.events_rx.recv_timeout(timeout).ok()
+    }
+
+    /// Try to receive a tree snapshot without blocking
+    pub fn try_recv_tree(&self) -> Option<WindowTreeSnapshot> {
+        self.tree_rx.try_recv().ok()
     }
 }
 
@@ -141,6 +154,7 @@ impl UiRecorder {
         activity_feed: Option<ActivityFeed>,
     ) -> Result<(RecordingHandle, Option<ActivityFeed>)> {
         let (tx, rx) = bounded::<UiEvent>(self.config.max_buffer_size);
+        let (tree_tx, tree_rx) = bounded::<WindowTreeSnapshot>(32);
         let stop = Arc::new(AtomicBool::new(false));
         let start_time = Instant::now();
 
@@ -150,6 +164,10 @@ impl UiRecorder {
         let current_app = Arc::new(Mutex::new(None::<String>));
         let current_window = Arc::new(Mutex::new(None::<String>));
 
+        // Shared state for UIA thread
+        let click_queue = Arc::new(Mutex::new(Vec::<ClickElementRequest>::new()));
+        let focused_element = Arc::new(Mutex::new(None::<ElementContext>));
+
         // Thread 1: Native Windows hooks for input events
         let tx1 = tx.clone();
         let stop1 = stop.clone();
@@ -157,8 +175,20 @@ impl UiRecorder {
         let app1 = current_app.clone();
         let window1 = current_window.clone();
         let feed1 = activity_feed.clone();
+        let click_queue1 = click_queue.clone();
+        let focused_element1 = focused_element.clone();
         threads.push(thread::spawn(move || {
-            run_native_hooks(tx1, stop1, start_time, config1, app1, window1, feed1);
+            run_native_hooks(
+                tx1,
+                stop1,
+                start_time,
+                config1,
+                app1,
+                window1,
+                feed1,
+                click_queue1,
+                focused_element1,
+            );
         }));
 
         // Thread 2: App/window observer
@@ -167,14 +197,74 @@ impl UiRecorder {
         let config2 = self.config.clone();
         let app2 = current_app.clone();
         let window2 = current_window.clone();
+        let focused_element2 = focused_element.clone();
         threads.push(thread::spawn(move || {
-            run_app_observer(tx2, stop2, start_time, config2, app2, window2);
+            run_app_observer(
+                tx2,
+                stop2,
+                start_time,
+                config2,
+                app2,
+                window2,
+                focused_element2,
+            );
+        }));
+
+        // Thread 3: UI Automation worker (tree capture, element context, clipboard)
+        let (element_tx, element_rx) = bounded::<(ClickElementRequest, ElementContext)>(100);
+        let stop3 = stop.clone();
+        let config3 = self.config.clone();
+        let click_queue3 = click_queue.clone();
+        let focused_element3 = focused_element.clone();
+        threads.push(thread::spawn(move || {
+            windows_uia::run_uia_thread(
+                tree_tx,
+                element_tx,
+                click_queue3,
+                focused_element3,
+                stop3,
+                config3,
+            );
+        }));
+
+        // Thread 4: Element context enrichment (sends enriched click events)
+        let tx4 = tx.clone();
+        let stop4 = stop.clone();
+        threads.push(thread::spawn(move || {
+            while !stop4.load(Ordering::Relaxed) {
+                match element_rx.recv_timeout(std::time::Duration::from_millis(100)) {
+                    Ok((req, ctx)) => {
+                        // Send a supplementary event with the element context for the click
+                        let event = UiEvent {
+                            id: None,
+                            timestamp: req.timestamp,
+                            relative_ms: 0,
+                            data: EventData::Click {
+                                x: req.x,
+                                y: req.y,
+                                button: 0,
+                                click_count: 0, // Marker: this is an element-context-only event
+                                modifiers: 0,
+                            },
+                            app_name: None,
+                            window_title: None,
+                            browser_url: None,
+                            element: Some(ctx),
+                            frame_id: None,
+                        };
+                        let _ = tx4.try_send(event);
+                    }
+                    Err(crossbeam_channel::RecvTimeoutError::Timeout) => continue,
+                    Err(crossbeam_channel::RecvTimeoutError::Disconnected) => break,
+                }
+            }
         }));
 
         Ok((
             RecordingHandle {
                 stop,
                 events_rx: rx,
+                tree_rx,
                 threads,
             },
             activity_feed,
@@ -196,6 +286,8 @@ struct HookState {
     current_app: Arc<Mutex<Option<String>>>,
     current_window: Arc<Mutex<Option<String>>>,
     activity_feed: Option<ActivityFeed>,
+    click_queue: Arc<Mutex<Vec<ClickElementRequest>>>,
+    focused_element: Arc<Mutex<Option<ElementContext>>>,
 }
 
 // Thread-local storage for hook state
@@ -217,6 +309,8 @@ fn run_native_hooks(
     current_app: Arc<Mutex<Option<String>>>,
     current_window: Arc<Mutex<Option<String>>>,
     activity_feed: Option<ActivityFeed>,
+    click_queue: Arc<Mutex<Vec<ClickElementRequest>>>,
+    focused_element: Arc<Mutex<Option<ElementContext>>>,
 ) {
     debug!("Starting native Windows hooks");
 
@@ -232,6 +326,8 @@ fn run_native_hooks(
             current_app,
             current_window,
             activity_feed,
+            click_queue,
+            focused_element,
         }));
     });
 
@@ -518,9 +614,48 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
         let mouse_struct = &*(lparam.0 as *const MSLLHOOKSTRUCT);
         let x = mouse_struct.pt.x;
         let y = mouse_struct.pt.y;
+        let msg = wparam.0 as u32;
 
         HOOK_STATE.with(|state| {
             if let Some(ref mut s) = *state.borrow_mut() {
+                // Fast path for WM_MOUSEMOVE — no mutex locks to avoid blocking
+                // the system-wide mouse input pipeline (critical for RDP cursor rendering)
+                if msg == WM_MOUSEMOVE {
+                    let (last_x, last_y) = s.last_mouse_pos;
+                    let dx = (x - last_x).abs();
+                    let dy = (y - last_y).abs();
+                    let moved = dx > 10 || dy > 10;
+
+                    if moved {
+                        if let Some(ref feed) = s.activity_feed {
+                            feed.record(ActivityKind::MouseMove);
+                        }
+                        s.last_mouse_pos = (x, y);
+
+                        if s.config.capture_mouse_move {
+                            let timestamp = Utc::now();
+                            let t = s.start.elapsed().as_millis() as u64;
+                            // Use try_lock to avoid blocking — skip if contended
+                            let app_name = s.current_app.try_lock().map(|g| g.clone());
+                            let window_title = s.current_window.try_lock().map(|g| g.clone());
+                            let event = UiEvent {
+                                id: None,
+                                timestamp,
+                                relative_ms: t,
+                                data: EventData::Move { x, y },
+                                app_name: app_name.unwrap_or(None),
+                                window_title: window_title.unwrap_or(None),
+                                browser_url: None,
+                                element: None,
+                                frame_id: None,
+                            };
+                            let _ = s.tx.try_send(event);
+                        }
+                    }
+                    return;
+                }
+
+                // Slow path for clicks/scroll — these are infrequent, mutex locks OK
                 let timestamp = Utc::now();
                 let t = s.start.elapsed().as_millis() as u64;
 
@@ -534,7 +669,7 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                     }
                 }
 
-                match wparam.0 as u32 {
+                match msg {
                     WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN => {
                         // Record activity
                         if let Some(ref feed) = s.activity_feed {
@@ -545,47 +680,32 @@ unsafe extern "system" fn mouse_hook_proc(code: i32, wparam: WPARAM, lparam: LPA
                             return;
                         }
 
-                        let button = match wparam.0 as u32 {
+                        let button = match msg {
                             WM_LBUTTONDOWN => 0,
                             WM_RBUTTONDOWN => 1,
                             WM_MBUTTONDOWN => 2,
                             _ => 0,
                         };
 
+                        // Attach focused element context (approximate, fast)
+                        let element = if s.config.capture_context {
+                            s.focused_element.lock().clone()
+                        } else {
+                            None
+                        };
+
                         let mut event =
                             UiEvent::click(timestamp, t, x, y, button, 1, get_modifier_state());
-                        event.app_name = app_name;
-                        event.window_title = window_title;
+                        event.app_name = app_name.clone();
+                        event.window_title = window_title.clone();
+                        event.element = element;
                         let _ = s.tx.try_send(event);
-                    }
 
-                    WM_MOUSEMOVE => {
-                        // Record activity (throttled)
-                        let (last_x, last_y) = s.last_mouse_pos;
-                        let dx = (x - last_x).abs();
-                        let dy = (y - last_y).abs();
-                        let moved = dx > 10 || dy > 10;
-
-                        if moved {
-                            if let Some(ref feed) = s.activity_feed {
-                                feed.record(ActivityKind::MouseMove);
-                            }
-                            s.last_mouse_pos = (x, y);
-
-                            if s.config.capture_mouse_move {
-                                let event = UiEvent {
-                                    id: None,
-                                    timestamp,
-                                    relative_ms: t,
-                                    data: EventData::Move { x, y },
-                                    app_name,
-                                    window_title,
-                                    browser_url: None,
-                                    element: None,
-                                    frame_id: None,
-                                };
-                                let _ = s.tx.try_send(event);
-                            }
+                        // Queue ElementFromPoint request for precise element context
+                        if s.config.capture_context {
+                            s.click_queue
+                                .lock()
+                                .push(ClickElementRequest { x, y, timestamp });
                         }
                     }
 
@@ -943,9 +1063,7 @@ fn vk_to_char(vk: u16, mods: u8) -> Option<char> {
 }
 
 fn get_clipboard_text() -> Option<String> {
-    // Windows clipboard access would require additional setup
-    // For now, return None - can be implemented later
-    None
+    windows_uia::get_clipboard_text_impl()
 }
 
 // ============================================================================
@@ -959,6 +1077,7 @@ fn run_app_observer(
     config: UiCaptureConfig,
     current_app: Arc<Mutex<Option<String>>>,
     current_window: Arc<Mutex<Option<String>>>,
+    focused_element: Arc<Mutex<Option<ElementContext>>>,
 ) {
     let mut last_hwnd: isize = 0;
     let mut last_title: Option<String> = None;
@@ -1004,22 +1123,27 @@ fn run_app_observer(
                 *current_app.lock() = Some(app_name.clone());
                 *current_window.lock() = title.clone();
 
+                // Get focused element context from UIA thread
+                let element = if config.capture_context {
+                    focused_element.lock().clone()
+                } else {
+                    None
+                };
+
                 // Send app switch event
                 if config.capture_app_switch {
-                    // TODO: Add UI Automation to get focused element value on Windows
-                    // For now, we don't capture focused element context on Windows
-                    let event = UiEvent::app_switch(
+                    let mut event = UiEvent::app_switch(
                         Utc::now(),
                         start.elapsed().as_millis() as u64,
                         app_name.clone(),
                         pid as i32,
                     );
+                    event.element = element.clone();
                     let _ = tx.try_send(event);
                 }
 
                 // Send window focus event
                 if config.capture_window_focus && title != last_title {
-                    // TODO: Add UI Automation to get focused element value on Windows
                     let event = UiEvent {
                         id: None,
                         timestamp: Utc::now(),
@@ -1031,7 +1155,7 @@ fn run_app_observer(
                         app_name: None,
                         window_title: None,
                         browser_url: None,
-                        element: None, // TODO: capture focused element on Windows
+                        element,
                         frame_id: None,
                     };
                     let _ = tx.try_send(event);
@@ -1046,7 +1170,7 @@ fn run_app_observer(
     }
 }
 
-fn get_process_name(pid: u32) -> Option<String> {
+pub(crate) fn get_process_name(pid: u32) -> Option<String> {
     use windows::Win32::Foundation::CloseHandle;
     use windows::Win32::System::Diagnostics::ToolHelp::{
         CreateToolhelp32Snapshot, Process32FirstW, Process32NextW, PROCESSENTRY32W,

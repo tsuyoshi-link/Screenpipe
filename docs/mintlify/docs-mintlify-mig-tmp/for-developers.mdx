@@ -1,0 +1,70 @@
+---
+title: "screenpipe for developers"
+sidebarTitle: "for developers"
+description: "Give your AI coding assistant memory of your screen. Use screenpipe with Claude Code, Cursor, Cline, Continue, and Gemini CLI. AI coding assistant with screen context."
+icon: "code"
+---
+
+screenpipe gives developers a superpower: AI that knows what you've been working on. it captures your screen and audio 24/7 and makes it available to coding assistants via MCP and REST API.
+
+## what developers use screenpipe for
+
+- **code search across time** — find that code snippet you saw in a PR review last week, even if you closed the tab
+- **meeting recall** — search what was said in standups, design reviews, or pair programming sessions
+- **context for AI coding** — give Cursor, Claude Code, or Cline memory of what's on your screen right now and what you worked on earlier
+- **automated workflows** — pipes that auto-track time in Toggl, sync daily activity to Obsidian, or generate standup reports
+
+## integrations
+
+screenpipe works with any AI tool that supports MCP or HTTP APIs:
+
+| tool | integration | guide |
+|------|-------------|-------|
+| **Claude Code** | MCP server — Claude Code can search your screen history, find code you saw earlier, recall meeting context | [setup guide](/claude-code) |
+| **Cursor** | MCP server — add screenpipe as a context source for Cursor's AI | [setup guide](/mcp-server) |
+| **Cline** | MCP server — give Cline access to your full screen history | [setup guide](/cline) |
+| **Continue** | MCP server — add screen context to Continue's AI completions | [setup guide](/continue) |
+| **Gemini CLI** | MCP server — use screenpipe with Google's Gemini CLI | [setup guide](/gemini-cli) |
+| **OpenCode** | MCP server — search screen history from OpenCode | [setup guide](/opencode) |
+| **Ollama** | local AI — use any local model with screenpipe, 100% private | [setup guide](/ollama) |
+
+## quick start
+
+1. [download screenpipe](https://screenpi.pe/onboarding)
+2. add the MCP server to your coding tool:
+
+```json
+{
+  "mcpServers": {
+    "screenpipe": {
+      "command": "npx",
+      "args": ["-y", "screenpipe-mcp"]
+    }
+  }
+}
+```
+
+3. ask your AI assistant: "what was I working on in the last hour?" or "find the code snippet I saw in that PR review"
+
+## example prompts
+
+once screenpipe is connected to your coding assistant:
+
+- "find the error message I saw in the terminal 30 minutes ago"
+- "what did we discuss in the standup about the auth refactor?"
+- "show me the API endpoint I was looking at in the browser"
+- "summarize what I worked on today for my standup"
+
+## automate with pipes
+
+[pipes](/pipes) are scheduled AI agents that run on your screen data. developers use them for:
+
+- **time tracking** — auto-log coding time to Toggl based on active apps
+- **daily journals** — sync screen activity to Obsidian
+- **standup reports** — generate daily summaries of what you worked on
+
+## get screenpipe
+
+screenpipe includes everything developers need — MCP server, pipes, cloud AI, and more. lifetime plans available starting at $400.
+
+[download screenpipe →](https://screenpi.pe/onboarding)

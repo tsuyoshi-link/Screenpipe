@@ -240,6 +240,90 @@ impl Language {
     }
 }
 
+impl std::str::FromStr for Language {
+    type Err = String;
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "english" | "en" => Ok(Self::English),
+            "chinese" | "zh" => Ok(Self::Chinese),
+            "german" | "de" => Ok(Self::German),
+            "spanish" | "es" => Ok(Self::Spanish),
+            "russian" | "ru" => Ok(Self::Russian),
+            "korean" | "ko" => Ok(Self::Korean),
+            "french" | "fr" => Ok(Self::French),
+            "japanese" | "ja" => Ok(Self::Japanese),
+            "portuguese" | "pt" => Ok(Self::Portuguese),
+            "turkish" | "tr" => Ok(Self::Turkish),
+            "polish" | "pl" => Ok(Self::Polish),
+            "catalan" | "ca" => Ok(Self::Catalan),
+            "dutch" | "nl" => Ok(Self::Dutch),
+            "arabic" | "ar" => Ok(Self::Arabic),
+            "swedish" | "sv" => Ok(Self::Swedish),
+            "italian" | "it" => Ok(Self::Italian),
+            "indonesian" | "id" => Ok(Self::Indonesian),
+            "hindi" | "hi" => Ok(Self::Hindi),
+            "finnish" | "fi" => Ok(Self::Finnish),
+            "hebrew" | "he" => Ok(Self::Hebrew),
+            "ukrainian" | "uk" => Ok(Self::Ukrainian),
+            "greek" | "el" => Ok(Self::Greek),
+            "malay" | "ms" => Ok(Self::Malay),
+            "czech" | "cs" => Ok(Self::Czech),
+            "romanian" | "ro" => Ok(Self::Romanian),
+            "danish" | "da" => Ok(Self::Danish),
+            "hungarian" | "hu" => Ok(Self::Hungarian),
+            "norwegian" | "no" => Ok(Self::Norwegian),
+            "thai" | "th" => Ok(Self::Thai),
+            "urdu" | "ur" => Ok(Self::Urdu),
+            "croatian" | "hr" => Ok(Self::Croatian),
+            "bulgarian" | "bg" => Ok(Self::Bulgarian),
+            "lithuanian" | "lt" => Ok(Self::Lithuanian),
+            "latin" | "la" => Ok(Self::Latin),
+            "malayalam" | "ml" => Ok(Self::Malayalam),
+            "welsh" | "cy" => Ok(Self::Welsh),
+            "slovak" | "sk" => Ok(Self::Slovak),
+            "persian" | "fa" => Ok(Self::Persian),
+            "latvian" | "lv" => Ok(Self::Latvian),
+            "bengali" | "bn" => Ok(Self::Bengali),
+            "serbian" | "sr" => Ok(Self::Serbian),
+            "azerbaijani" | "az" => Ok(Self::Azerbaijani),
+            "slovenian" | "sl" => Ok(Self::Slovenian),
+            "estonian" | "et" => Ok(Self::Estonian),
+            "macedonian" | "mk" => Ok(Self::Macedonian),
+            "nepali" | "ne" => Ok(Self::Nepali),
+            "mongolian" | "mn" => Ok(Self::Mongolian),
+            "bosnian" | "bs" => Ok(Self::Bosnian),
+            "kazakh" | "kk" => Ok(Self::Kazakh),
+            "albanian" | "sq" => Ok(Self::Albanian),
+            "swahili" | "sw" => Ok(Self::Swahili),
+            "galician" | "gl" => Ok(Self::Galician),
+            "marathi" | "mr" => Ok(Self::Marathi),
+            "punjabi" | "pa" => Ok(Self::Punjabi),
+            "sinhala" | "si" => Ok(Self::Sinhala),
+            "khmer" | "km" => Ok(Self::Khmer),
+            "afrikaans" | "af" => Ok(Self::Afrikaans),
+            "belarusian" | "be" => Ok(Self::Belarusian),
+            "gujarati" | "gu" => Ok(Self::Gujarati),
+            "amharic" | "am" => Ok(Self::Amharic),
+            "yiddish" | "yi" => Ok(Self::Yiddish),
+            "lao" | "lo" => Ok(Self::Lao),
+            "uzbek" | "uz" => Ok(Self::Uzbek),
+            "faroese" | "fo" => Ok(Self::Faroese),
+            "pashto" | "ps" => Ok(Self::Pashto),
+            "maltese" | "mt" => Ok(Self::Maltese),
+            "sanskrit" | "sa" => Ok(Self::Sanskrit),
+            "luxembourgish" | "lb" => Ok(Self::Luxembourgish),
+            "myanmar" | "my" => Ok(Self::Myanmar),
+            "tibetan" | "bo" => Ok(Self::Tibetan),
+            "tagalog" | "tl" => Ok(Self::Tagalog),
+            "assamese" | "as" => Ok(Self::Assamese),
+            "tatar" | "tt" => Ok(Self::Tatar),
+            "hausa" | "ha" => Ok(Self::Hausa),
+            "javanese" | "jw" => Ok(Self::Javanese),
+            _ => Err(format!("unknown language: {s}")),
+        }
+    }
+}
+
 impl fmt::Display for Language {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let possible_value = self.to_possible_value().unwrap();
@@ -251,6 +335,39 @@ impl fmt::Display for Language {
 impl PartialEq<&str> for Language {
     fn eq(&self, other: &&str) -> bool {
         self.to_string().as_str() == *other
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn language_from_str_by_name() {
+        assert_eq!("english".parse::<Language>().unwrap(), Language::English);
+        assert_eq!("french".parse::<Language>().unwrap(), Language::French);
+        assert_eq!("japanese".parse::<Language>().unwrap(), Language::Japanese);
+    }
+
+    #[test]
+    fn language_from_str_by_iso_code() {
+        assert_eq!("en".parse::<Language>().unwrap(), Language::English);
+        assert_eq!("fr".parse::<Language>().unwrap(), Language::French);
+        assert_eq!("ja".parse::<Language>().unwrap(), Language::Japanese);
+    }
+
+    #[test]
+    fn language_from_str_case_insensitive() {
+        assert_eq!("ENGLISH".parse::<Language>().unwrap(), Language::English);
+        assert_eq!("English".parse::<Language>().unwrap(), Language::English);
+        assert_eq!("eNgLiSh".parse::<Language>().unwrap(), Language::English);
+    }
+
+    #[test]
+    fn language_from_str_unknown_returns_error() {
+        let result = "klingon".parse::<Language>();
+        assert!(result.is_err());
+        assert!(result.unwrap_err().contains("unknown language"));
     }
 }
 

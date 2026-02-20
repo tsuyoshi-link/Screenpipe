@@ -320,7 +320,7 @@ jobs:
       - name: Setup Bun
         uses: oven-sh/setup-bun@v2
         with:
-          bun-version: 1.2.2
+          bun-version: 1.3.7
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -696,6 +696,37 @@ jobs:
             throw "No DLLs found in target directory!"
           }
 
+      - name: Download ONNX Runtime (CPU) for Windows
+        if: matrix.os_type == 'windows'
+        shell: pwsh
+        run: |
+          # Pre-download CPU onnxruntime for both Tauri resources and ort linking.
+          # Extract to TWO separate directories to avoid file locking:
+          # - onnxruntime-win-x64-1.19.2/ → Tauri resources (tauri_build reads these)
+          # - ort-system-lib/ → ORT_LIB_LOCATION (ort-sys copy-dylibs reads these)
+          # These build scripts run concurrently (different dependency chains), so they
+          # MUST NOT share files or Windows will return os error 32 (file locked).
+          $url = "https://github.com/microsoft/onnxruntime/releases/download/v1.19.2/onnxruntime-win-x64-1.19.2.zip"
+          $zipFile = "onnxruntime-win-x64-1.19.2.zip"
+          $tauriDir = "apps/screenpipe-app-tauri/src-tauri/onnxruntime-win-x64-1.19.2"
+          $ortDir = "ort-system-lib"
+          Invoke-WebRequest -Uri $url -OutFile $zipFile
+          if (Test-Path $tauriDir) { Remove-Item $tauriDir -Recurse -Force }
+          7z x $zipFile -o"apps/screenpipe-app-tauri/src-tauri/" -y
+          Write-Host "ONNX Runtime extracted to $tauriDir (for Tauri resources)"
+          # Create separate copy for ort-sys linking
+          if (Test-Path $ortDir) { Remove-Item $ortDir -Recurse -Force }
+          Copy-Item -Path $tauriDir -Destination $ortDir -Recurse -Force
+          Write-Host "ONNX Runtime copied to $ortDir (for ORT_LIB_LOCATION)"
+          Get-ChildItem "$ortDir/lib" | ForEach-Object { Write-Host $_.Name }
+
+      - name: Set ORT env vars for Windows
+        if: matrix.os_type == 'windows'
+        shell: bash
+        run: |
+          echo "ORT_STRATEGY=system" >> $GITHUB_ENV
+          echo "ORT_LIB_LOCATION=${{ github.workspace }}/ort-system-lib" >> $GITHUB_ENV
+
       - name: Use production config for release
         shell: bash
         run: cp apps/screenpipe-app-tauri/src-tauri/tauri.prod.conf.json apps/screenpipe-app-tauri/src-tauri/tauri.conf.json
@@ -706,6 +737,44 @@ jobs:
         run: |
           echo "MACOSX_DEPLOYMENT_TARGET=10.15" >> $GITHUB_ENV
           echo "Setting MACOSX_DEPLOYMENT_TARGET=10.15 for std::filesystem support"
+
+      - name: Fix codesign cert chain on self-hosted runners
+        if: matrix.os_type == 'macos'
+        shell: bash
+        run: |
+          # On macOS 26 self-hosted runners, Tauri's bundler creates a temp keychain
+          # and sets the search list to just login+temp, dropping System.keychain.
+          # codesign then can't find Apple intermediate certs for chain verification.
+          #
+          # Fix: import Apple intermediate CA certs directly into the login keychain.
+          # This way codesign finds them regardless of which keychains are in the
+          # search list — no PATH wrapper needed (Tauri calls /usr/bin/codesign directly).
+          security unlock-keychain -p '' ~/Library/Keychains/login.keychain-db 2>/dev/null || true
+
+          # Download Apple intermediate certs if not cached
+          mkdir -p ~/apple-certs
+          if [ ! -f ~/apple-certs/DeveloperIDG2CA.cer ]; then
+            curl -sL -o ~/apple-certs/DeveloperIDG2CA.cer https://www.apple.com/certificateauthority/DeveloperIDG2CA.cer
+            curl -sL -o ~/apple-certs/AppleWWDRCAG3.cer https://www.apple.com/certificateauthority/AppleWWDRCAG3.cer
+            curl -sL -o ~/apple-certs/AppleIncRootCertificate.cer https://www.apple.com/certificateauthority/AppleIncRootCertificate.cer
+          fi
+
+          # Import Apple CA certs into login keychain so codesign can build the chain
+          for cert in ~/apple-certs/*.cer; do
+            if [ -f "$cert" ]; then
+              security import "$cert" -t cert -k ~/Library/Keychains/login.keychain-db 2>/dev/null || true
+              echo "Imported $(basename "$cert") into login keychain"
+            fi
+          done
+
+          # Also import into System.keychain as belt-and-suspenders
+          for cert in ~/apple-certs/*.cer; do
+            if [ -f "$cert" ]; then
+              sudo security import "$cert" -t cert -k /Library/Keychains/System.keychain 2>/dev/null || true
+            fi
+          done
+
+          echo "Imported Apple intermediate CA certificates for codesign chain verification"
 
       - name: Compute Tauri build args
         id: tauri-args
@@ -764,6 +833,7 @@ jobs:
           RUSTFLAGS: ${{ matrix.os_type == 'windows' && '-C target-feature=+crt-static -C link-arg=/LTCG' || '' }}
           VCPKG_STATIC_LINKAGE: "true"
           KNF_STATIC_CRT: ${{ matrix.os_type == 'windows' && '1' || '' }}
+          # ORT_STRATEGY and ORT_LIB_LOCATION set via GITHUB_ENV in Windows-only step above
           # Fix whisper.cpp crash on newer CPUs (Lunar Lake, etc.) that lack AVX-512
           # GitHub windows-2022 runners have Xeon CPUs with AVX-512, but GGML_NATIVE=ON
           # compiles with -march=native, causing illegal instruction crashes on CPUs without AVX-512
@@ -777,6 +847,36 @@ jobs:
           projectPath: "./apps/screenpipe-app-tauri"
           tauriScript: bunx tauri -vvv
           retryAttempts: 3
+
+      - name: Notarize and staple DMGs (macOS)
+        if: matrix.os_type == 'macos'
+        env:
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          TARGET="${{ matrix.target }}"
+          BUNDLE_DIR="apps/screenpipe-app-tauri/src-tauri/target/${TARGET}/release/bundle"
+
+          echo "=== Notarizing and stapling DMGs ==="
+          for dmg in "${BUNDLE_DIR}"/dmg/*.dmg; do
+            if [ -f "$dmg" ]; then
+              echo "Notarizing: $(basename "$dmg")"
+              xcrun notarytool submit "$dmg" \
+                --apple-id "$APPLE_ID" \
+                --password "$APPLE_PASSWORD" \
+                --team-id "$APPLE_TEAM_ID" \
+                --wait --timeout 15m
+
+              echo "Stapling: $(basename "$dmg")"
+              xcrun stapler staple "$dmg"
+
+              echo "Verifying: $(basename "$dmg")"
+              xcrun stapler validate "$dmg"
+              spctl --assess --type open --context context:primary-signature --verbose "$dmg" 2>&1 || true
+              echo "✅ $(basename "$dmg") notarized and stapled"
+            fi
+          done
 
       - name: Upload debug symbols to Sentry (Windows)
         if: matrix.os_type == 'windows'
@@ -812,6 +912,7 @@ jobs:
 
       - name: Upload to Cloudflare R2 (macOS)
         if: matrix.os_type == 'macos'
+        continue-on-error: true
         shell: bash
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -856,6 +957,7 @@ jobs:
 
       - name: Upload to Cloudflare R2 (Windows)
         if: matrix.os_type == 'windows'
+        continue-on-error: true
         shell: powershell
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
