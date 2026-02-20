@@ -51,6 +51,17 @@
   3. do a full Windows `.exe` build only at release checkpoints.
 - Treat full `.exe` builds as expensive validation, not as the default feedback loop.
 
+## Hard Stop: Windows Rust Command Preflight (Mandatory)
+- Scope: any Rust command on Windows in this repo (`cargo check`, `cargo test`, `cargo build`), not only EXE rebuild.
+- Before running, always set:
+  - `CARGO_TARGET_DIR` to a short path (recommended: `C:\t\target` or `C:\t\target-<task>`).
+  - `CARGO_BUILD_JOBS=1..3` when low-load mode is required.
+- Do not run Rust commands against default nested `target` paths under `apps/screenpipe-app-tauri/src-tauri` on Windows.
+- Failure mode this prevents:
+  - MSBuild/CMake path-length failures (including `MSB3491` and whisper/CMake try-compile errors with path length 260).
+- Standard command shape:
+  - ``$env:CARGO_TARGET_DIR='C:\t\target-check'; $env:CARGO_BUILD_JOBS='1'; cargo check --manifest-path apps/screenpipe-app-tauri/src-tauri/Cargo.toml``
+
 ## Recommended Test/Build Levels
 Use the lightest level that proves the change.
 

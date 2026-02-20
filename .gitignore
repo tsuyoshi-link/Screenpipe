@@ -34,6 +34,7 @@ pnpm-lock.yaml
 
 # Ignore onnxruntime-win-x64 libraries
 onnxruntime-win-x64*/
+onnxruntime-win-x64*.zip
 
 # ignore environment variables
 .env
