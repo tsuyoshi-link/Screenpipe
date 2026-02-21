@@ -1,6 +1,7 @@
 name: Windows CLI Integration Test
 
 on:
+  workflow_dispatch:
   push:
     branches: [ main ]
   pull_request:
@@ -134,3 +135,4 @@ jobs:
         include-hidden-files: true
         path: |
           ~/.screenpipe/*
+
