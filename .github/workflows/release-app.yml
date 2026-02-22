@@ -864,6 +864,18 @@ jobs:
           tauriScript: bunx tauri -vvv
           retryAttempts: 3
 
+      - name: Upload unsigned validation artifacts
+        if: github.event.inputs.validation_unsigned == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-app-validation-${{ matrix.os_type }}-${{ matrix.target || 'native' }}-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/screenpipe-app*
+            apps/screenpipe-app-tauri/src-tauri/target/release/screenpipe-app*
+            apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/**
+            apps/screenpipe-app-tauri/src-tauri/target/release/bundle/**
+
       - name: Notarize and staple DMGs (macOS)
         if: github.event.inputs.validation_unsigned != 'true' && matrix.os_type == 'macos'
         env:
