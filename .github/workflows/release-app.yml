@@ -20,6 +20,10 @@ on:
         description: "Force GitHub-hosted runners (skip self-hosted even if online)"
         type: boolean
         default: false
+      validation_unsigned:
+        description: "Unsigned validation mode (skip prod config/signing/uploads, use --no-bundle)"
+        type: boolean
+        default: false
   push:
     branches: [main]
 
@@ -233,14 +237,15 @@ jobs:
           - platform: ${{ needs.check_commit.outputs.windows_runner || 'windows-2022' }}
             args: "--target x86_64-pc-windows-msvc --features mkl"
             pre-build-args: ""
+            target: x86_64-pc-windows-msvc
             tauri-args: "--target x86_64-pc-windows-msvc --features official-build"
             os_type: "windows"
-          # Linux disabled - too many bundling issues
-          # - platform: "ubuntu-22.04"
-          #   args: "--target x86_64-unknown-linux-gnu"
-          #   target: x86_64-unknown-linux-gnu
-          #   tauri-args: ""
-          #   os_type: "linux"
+          # Linux build lane (temporary re-enable for validation)
+          - platform: "ubuntu-22.04"
+            args: "--target x86_64-unknown-linux-gnu"
+            target: x86_64-unknown-linux-gnu
+            tauri-args: ""
+            os_type: "linux"
 
     runs-on: ${{ matrix.platform == 'macos-26' && fromJSON('["self-hosted", "macos-26"]') || matrix.platform == 'macos-test' && fromJSON('["self-hosted", "macos-test"]') || matrix.platform == 'windows-desktop-test' && fromJSON('["self-hosted", "windows-desktop-test"]') || matrix.platform }}
     timeout-minutes: 120
@@ -475,6 +480,7 @@ jobs:
             libayatana-appindicator3-dev \
             libsamplerate-dev \
             libwebrtc-audio-processing-dev \
+            libpipewire-0.3-dev \
             libgtk-3-dev \
             librsvg2-dev \
             patchelf
@@ -728,6 +734,7 @@ jobs:
           echo "ORT_LIB_LOCATION=${{ github.workspace }}/ort-system-lib" >> $GITHUB_ENV
 
       - name: Use production config for release
+        if: github.event.inputs.validation_unsigned != 'true'
         shell: bash
         run: cp apps/screenpipe-app-tauri/src-tauri/tauri.prod.conf.json apps/screenpipe-app-tauri/src-tauri/tauri.conf.json
 
@@ -786,6 +793,16 @@ jobs:
             ARGS=$(echo "$ARGS" | sed 's/--features \([^ ]*\)/--features \1,apple-intelligence/')
             echo "🧠 Tauri build will include Apple Intelligence"
           fi
+          if [[ "${{ github.event.inputs.validation_unsigned }}" == "true" ]]; then
+            ARGS=$(echo "$ARGS" | sed -E 's/--features[[:space:]]+official-build//g; s/,official-build//g; s/official-build,//g')
+            ARGS=$(echo "$ARGS" | sed -E 's/[[:space:]]+/ /g; s/^ //; s/ $//')
+            if [[ -z "$ARGS" ]]; then
+              ARGS="--no-bundle"
+            elif [[ "$ARGS" != *"--no-bundle"* ]]; then
+              ARGS="$ARGS --no-bundle"
+            fi
+            echo "🧪 Validation unsigned mode enabled (no prod config, no bundle/sign/upload)"
+          fi
           echo "args=$ARGS" >> $GITHUB_OUTPUT
           echo "Final tauri args: $ARGS"
 
@@ -793,17 +810,17 @@ jobs:
         uses: tauri-apps/tauri-action@v0.5.17
         env:
           # for updater
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_KEY_PASSWORD }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ github.event.inputs.validation_unsigned == 'true' && '' || secrets.TAURI_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ github.event.inputs.validation_unsigned == 'true' && '' || secrets.TAURI_KEY_PASSWORD }}
           # for release
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # for macos signing
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          APPLE_CERTIFICATE: ${{ github.event.inputs.validation_unsigned == 'true' && '' || secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ github.event.inputs.validation_unsigned == 'true' && '' || secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ github.event.inputs.validation_unsigned == 'true' && '' || secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ github.event.inputs.validation_unsigned == 'true' && '' || secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ github.event.inputs.validation_unsigned == 'true' && '' || secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ github.event.inputs.validation_unsigned == 'true' && '' || secrets.APPLE_TEAM_ID }}
           # https://tauri.app/v1/guides/distribution/sign-macos
           CI: true
           # Fix std::filesystem availability - requires macOS 10.15+
@@ -848,8 +865,20 @@ jobs:
           tauriScript: bunx tauri -vvv
           retryAttempts: 3
 
+      - name: Upload unsigned validation artifacts
+        if: github.event.inputs.validation_unsigned == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-app-validation-${{ matrix.os_type }}-${{ matrix.target || 'native' }}-${{ github.run_id }}
+          if-no-files-found: warn
+          path: |
+            apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/screenpipe-app*
+            apps/screenpipe-app-tauri/src-tauri/target/release/screenpipe-app*
+            apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/bundle/**
+            apps/screenpipe-app-tauri/src-tauri/target/release/bundle/**
+
       - name: Notarize and staple DMGs (macOS)
-        if: matrix.os_type == 'macos'
+        if: github.event.inputs.validation_unsigned != 'true' && matrix.os_type == 'macos'
         env:
           APPLE_ID: ${{ secrets.APPLE_ID }}
           APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
@@ -879,7 +908,7 @@ jobs:
           done
 
       - name: Upload debug symbols to Sentry (Windows)
-        if: matrix.os_type == 'windows'
+        if: github.event.inputs.validation_unsigned != 'true' && matrix.os_type == 'windows'
         continue-on-error: true
         shell: powershell
         env:
@@ -894,7 +923,7 @@ jobs:
           .\sentry-cli.exe debug-files upload --org $env:SENTRY_ORG --project screenpipe-app apps/screenpipe-app-tauri/src-tauri/target/release/
 
       - name: Upload debug symbols to Sentry (macOS)
-        if: matrix.os_type == 'macos'
+        if: github.event.inputs.validation_unsigned != 'true' && matrix.os_type == 'macos'
         continue-on-error: true
         shell: bash
         env:
@@ -911,7 +940,7 @@ jobs:
           sentry-cli debug-files upload --org $SENTRY_ORG --project screenpipe-app apps/screenpipe-app-tauri/src-tauri/target/${{ matrix.target }}/release/
 
       - name: Upload to Cloudflare R2 (macOS)
-        if: matrix.os_type == 'macos'
+        if: github.event.inputs.validation_unsigned != 'true' && matrix.os_type == 'macos'
         continue-on-error: true
         shell: bash
         env:
@@ -956,7 +985,7 @@ jobs:
           echo "R2 upload complete for ${TARGET}"
 
       - name: Upload to Cloudflare R2 (Windows)
-        if: matrix.os_type == 'windows'
+        if: github.event.inputs.validation_unsigned != 'true' && matrix.os_type == 'windows'
         continue-on-error: true
         shell: powershell
         env:
@@ -991,7 +1020,7 @@ jobs:
           Write-Host "R2 upload complete for Windows"
 
       - name: Rebuild and upload beta (Windows)
-        if: matrix.os_type == 'windows' && (needs.check_commit.outputs.should_beta == 'true' || github.event_name == 'workflow_dispatch')
+        if: github.event.inputs.validation_unsigned != 'true' && matrix.os_type == 'windows' && (needs.check_commit.outputs.should_beta == 'true' || github.event_name == 'workflow_dispatch')
         continue-on-error: true
         shell: powershell
         env:
@@ -1040,7 +1069,7 @@ jobs:
           Write-Host "R2 beta upload complete for Windows"
 
       - name: Clean stale beta artifacts before stable upload
-        if: matrix.os_type != 'windows'
+        if: github.event.inputs.validation_unsigned != 'true' && matrix.os_type != 'windows'
         shell: bash
         run: |
           # Remove any leftover beta artifacts from previous builds (self-hosted runners persist)
@@ -1048,7 +1077,7 @@ jobs:
           echo "Cleaned stale beta artifacts"
 
       - name: Rebuild with beta config (Non-Windows)
-        if: matrix.os_type != 'windows' && (needs.check_commit.outputs.should_beta == 'true' || github.event_name == 'workflow_dispatch')
+        if: github.event.inputs.validation_unsigned != 'true' && matrix.os_type != 'windows' && (needs.check_commit.outputs.should_beta == 'true' || github.event_name == 'workflow_dispatch')
         continue-on-error: true
         shell: bash
         env:
@@ -1078,7 +1107,7 @@ jobs:
           find src-tauri/target -name "*.dmg" -o -name "*.app.tar.gz" -o -name "*.exe" 2>/dev/null
 
       - name: Upload beta to R2 (macOS)
-        if: matrix.os_type == 'macos' && (needs.check_commit.outputs.should_beta == 'true' || github.event_name == 'workflow_dispatch')
+        if: github.event.inputs.validation_unsigned != 'true' && matrix.os_type == 'macos' && (needs.check_commit.outputs.should_beta == 'true' || github.event_name == 'workflow_dispatch')
         continue-on-error: true
         shell: bash
         env:
@@ -1119,7 +1148,7 @@ jobs:
 
   generate-changelog:
     needs: [check_commit, publish-tauri]
-    if: github.event_name == 'workflow_dispatch' || needs.check_commit.outputs.should_release == 'true'
+    if: github.event.inputs.validation_unsigned != 'true' && (github.event_name == 'workflow_dispatch' || needs.check_commit.outputs.should_release == 'true')
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

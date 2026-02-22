@@ -5,6 +5,7 @@
 name: Rust CI
 
 on:
+  workflow_dispatch:
   push:
     paths:
       - '**.rs'
@@ -188,3 +189,4 @@ jobs:
       # PII redaction tests skipped on macOS due to whisper-rs build issues
       # - name: Run PII redaction tests
       #   run: cargo test -p screenpipe-server --lib pii_redaction_tests
+
