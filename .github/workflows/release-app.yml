@@ -237,6 +237,7 @@ jobs:
           - platform: ${{ needs.check_commit.outputs.windows_runner || 'windows-2022' }}
             args: "--target x86_64-pc-windows-msvc --features mkl"
             pre-build-args: ""
+            target: x86_64-pc-windows-msvc
             tauri-args: "--target x86_64-pc-windows-msvc --features official-build"
             os_type: "windows"
           # Linux build lane (temporary re-enable for validation)
