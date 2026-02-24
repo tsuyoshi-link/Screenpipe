@@ -555,6 +555,7 @@ export function StandaloneChat() {
   const piStoppedIntentionallyRef = useRef(false);
   const activePresetRef = useRef<AIPreset | undefined>(undefined);
   const userTokenRef = useRef<string | null>(null);
+  const piBootstrapAttemptedKeyRef = useRef<string | null>(null);
   const piThinkingStartRef = useRef<number | null>(null);
 
   // Follow-up suggestions state (TikTok-style)
@@ -1158,8 +1159,8 @@ export function StandaloneChat() {
     if (!activePreset) return "No preset selected";
     if (!hasValidModel) return `No model selected in "${activePreset.id}" preset`;
     if (needsLogin) return "Login required";
-    if (piStarting) return "Starting Pi agent...";
-    if (!piReady) return "Connecting to Pi agent...";
+    if (piStarting) return "Starting local chat runtime...";
+    if (!piReady) return "Connecting to local chat runtime...";
     return null;
   };
   const disabledReason = getDisabledReason();
@@ -1233,6 +1234,56 @@ export function StandaloneChat() {
     }, 3000);
     return () => clearInterval(interval);
   }, []);
+
+  // Bootstrap Pi for the selected preset when app starts and Rust-side auto-start did not launch it.
+  useEffect(() => {
+    if (!activePreset) return;
+    if (piInfo === null) return; // wait for first piInfo() probe
+    if (piInfo.running) {
+      piBootstrapAttemptedKeyRef.current = null;
+      return;
+    }
+    if (piStartInFlightRef.current) return;
+
+    const providerConfig = buildProviderConfig();
+    if (!providerConfig) return;
+    const key = `${providerConfig.provider}|${providerConfig.model}|${settings.user?.token ?? ""}`;
+    if (piBootstrapAttemptedKeyRef.current === key) return;
+    piBootstrapAttemptedKeyRef.current = key;
+
+    const startMissingPi = async () => {
+      piStartInFlightRef.current = true;
+      setPiStarting(true);
+      let dir: string;
+      try {
+        const home = await homeDir();
+        dir = await join(home, ".screenpipe", "pi-chat");
+      } catch {
+        dir = "/tmp/.screenpipe/pi-chat";
+      }
+      console.log("[Pi] Bootstrapping for active preset:", providerConfig.provider, providerConfig.model);
+      try {
+        const result = await commands.piStart(dir, settings.user?.token ?? null, providerConfig);
+        if (result.status === "ok") {
+          setPiInfo(result.data);
+        } else {
+          console.error("[Pi] Bootstrap start failed:", result.error);
+          toast({
+            title: "Failed to start chat runtime",
+            description: result.error,
+            variant: "destructive",
+          });
+        }
+      } catch (e) {
+        console.error("[Pi] Bootstrap exception:", e);
+      } finally {
+        piStartInFlightRef.current = false;
+        setPiStarting(false);
+      }
+    };
+
+    startMissingPi();
+  }, [activePreset?.id, activePreset?.provider, activePreset?.model, buildProviderConfig, piInfo, settings.user?.token, toast]);
 
   // Track previous preset to detect changes
   const prevPresetRef = useRef<{ provider?: string; model?: string; token?: string | null }>({});
