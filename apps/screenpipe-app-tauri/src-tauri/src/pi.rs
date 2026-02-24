@@ -462,20 +462,38 @@ fn ensure_pi_config(user_token: Option<&str>, provider_config: Option<&PiProvide
                 _ => "".to_string(),
             };
 
+            let mut model_entry = json!({
+                "id": config.model,
+                "name": config.model,
+                "input": ["text"],
+                "contextWindow": 128000,
+                "maxTokens": 16384,
+                "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
+            });
+
+            // pi-ai's OpenAI-compatible provider only auto-detects qwen thinking format
+            // for some endpoints. For Ollama-hosted qwen models, explicitly mark qwen
+            // compatibility so Pi's existing thinkingLevel=off maps to enable_thinking=false.
+            let is_qwen_ollama = config.provider == "native-ollama"
+                && config.model.to_ascii_lowercase().starts_with("qwen");
+            if is_qwen_ollama {
+                if let Some(obj) = model_entry.as_object_mut() {
+                    obj.insert("reasoning".to_string(), json!(true));
+                    obj.insert(
+                        "compat".to_string(),
+                        json!({
+                            "thinkingFormat": "qwen",
+                            "supportsReasoningEffort": false
+                        }),
+                    );
+                }
+            }
+
             let user_provider = json!({
                 "baseUrl": base_url,
                 "api": "openai-completions",
                 "apiKey": api_key,
-                "models": [
-                    {
-                        "id": config.model,
-                        "name": config.model,
-                        "input": ["text"],
-                        "contextWindow": 128000,
-                        "maxTokens": 16384,
-                        "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0}
-                    }
-                ]
+                "models": [model_entry]
             });
 
             if let Some(providers) = models_config.get_mut("providers").and_then(|p| p.as_object_mut()) {
