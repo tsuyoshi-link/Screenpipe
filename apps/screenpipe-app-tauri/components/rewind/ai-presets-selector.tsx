@@ -784,12 +784,28 @@ export const AIPresetsSelector = ({
   const aiPresets = (settings?.aiPresets || []) as AIPreset[];
 
   const selectedPreset = useMemo(() => {
-    // Use the first preset or default preset
-    const defaultPreset = settings?.aiPresets?.find(
+    // Use default preset when possible, but prefer a local preset if the default needs cloud login.
+    const presets = settings?.aiPresets || [];
+    const defaultPreset = presets.find(
       (preset) => preset.defaultPreset,
     );
-    return defaultPreset?.id || settings?.aiPresets?.[0]?.id || undefined;
-  }, [settings?.aiPresets]);
+    const defaultNeedsLogin =
+      !!defaultPreset &&
+      (defaultPreset.provider === "pi" || defaultPreset.provider === "screenpipe-cloud") &&
+      !settings?.user?.token;
+
+    if (defaultNeedsLogin) {
+      const localPreset = presets.find(
+        (preset) =>
+          preset.provider !== "pi" &&
+          preset.provider !== "screenpipe-cloud" &&
+          !!preset.model?.trim(),
+      );
+      if (localPreset) return localPreset.id;
+    }
+
+    return defaultPreset?.id || presets[0]?.id || undefined;
+  }, [settings?.aiPresets, settings?.user?.token]);
 
   // Check if selected preset requires login
   const selectedPresetRequiresLogin = useMemo(() => {
@@ -801,7 +817,7 @@ export const AIPresetsSelector = ({
     if (onPresetChange) {
       onPresetChange(aiPresets.find((p) => p.id === selectedPreset) as AIPreset);
     }
-  }, [selectedPreset, onPresetChange]);
+  }, [aiPresets, selectedPreset, onPresetChange]);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -1192,12 +1208,14 @@ export const AIPresetsSelector = ({
                       key={preset.id}
                       value={preset.id}
                       onSelect={(currentValue) => {
-                        // Set the selected preset as default
-                        const selectedPresetObj = aiPresets.find(p => p.id === currentValue);
+                        // cmdk may normalize values (e.g. lowercase), so match preset ids case-insensitively.
+                        const selectedPresetObj = aiPresets.find(
+                          (p) => p.id.toLowerCase() === currentValue.toLowerCase(),
+                        );
                         if (selectedPresetObj && selectedPresetObj.id !== selectedPreset) {
                           const updatedPresets = aiPresets.map((p) => ({
                             ...p,
-                            defaultPreset: p.id === currentValue,
+                            defaultPreset: p.id === selectedPresetObj.id,
                           }));
 
                           updateSettings({

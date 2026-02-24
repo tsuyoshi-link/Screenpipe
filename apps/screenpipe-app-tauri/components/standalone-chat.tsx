@@ -1142,9 +1142,24 @@ export function StandaloneChat() {
       }
 
       const defaultPreset = settings.aiPresets.find((p) => p.defaultPreset);
+      const defaultNeedsLogin =
+        !!defaultPreset &&
+        (defaultPreset.provider === "screenpipe-cloud" || defaultPreset.provider === "pi") &&
+        !settings.user?.token;
+
+      if (defaultNeedsLogin) {
+        const localPreset = settings.aiPresets.find(
+          (p) =>
+            p.provider !== "screenpipe-cloud" &&
+            p.provider !== "pi" &&
+            !!p.model?.trim(),
+        );
+        if (localPreset) return localPreset;
+      }
+
       return defaultPreset || settings.aiPresets[0];
     });
-  }, [settings.aiPresets]);
+  }, [settings.aiPresets, settings.user?.token]);
 
   const hasPresets = settings.aiPresets && settings.aiPresets.length > 0;
   // All providers now route through Pi — isPi is always true when we have a preset
