@@ -203,17 +203,10 @@ const OnboardingStatus: React.FC<OnboardingStatusProps> = ({
   };
 
   const ensureDefaultPreset = async () => {
-    if (settings.aiPresets.length === 0) {
-      const defaultPreset = {
-        id: "pi-agent",
-        provider: "pi" as const,
-        url: "",
-        model: "claude-haiku-4-5",
-        maxContextChars: 200000,
-        defaultPreset: true,
-        prompt: "",
-      };
-      await updateSettings({ aiPresets: [defaultPreset as any] });
+    // Privacy-first behavior: do not auto-create a cloud-backed preset during onboarding.
+    // Users can explicitly create/select a preset in AI Settings.
+    if (!Array.isArray(settings.aiPresets)) {
+      await updateSettings({ aiPresets: [] as any });
     }
   };
 

@@ -142,22 +142,11 @@ const DEFAULT_IGNORED_WINDOWS_PER_OS: Record<string, string[]> = {
 	linux: ["Info center", "Discover", "Parted"],
 };
 
-// Default Pi agent preset — local coding agent with screenpipe search skill
-const DEFAULT_PI_PRESET: AIPreset = {
-	id: "pi-agent",
-	provider: "pi",
-	url: "",
-	model: "claude-haiku-4-5",
-	maxContextChars: 200000,
-	defaultPreset: true,
-	prompt: "",
-};
-
-// Legacy presets removed — Pi agent is the only default now
-// screenpipe-cloud presets are migrated away for existing users
+// Legacy presets removed — screenpipe-cloud presets are migrated away for existing users.
+// Privacy-first fork policy: do not auto-insert cloud-backed presets for users.
 
 let DEFAULT_SETTINGS: Settings = {
-			aiPresets: [DEFAULT_PI_PRESET as any],
+			aiPresets: [],
 			deviceId: crypto.randomUUID(),
 			deepgramApiKey: "",
 			isLoading: false,
@@ -293,25 +282,13 @@ function createSettingsStore() {
 			needsUpdate = true;
 		}
 
-		// Migration: Add default presets if user has none
-		if (!settings.aiPresets || settings.aiPresets.length === 0) {
-			settings.aiPresets = [DEFAULT_PI_PRESET as any];
+		// Migration: normalize aiPresets shape, but do not auto-insert cloud presets
+		if (!Array.isArray(settings.aiPresets)) {
+			settings.aiPresets = [];
 			needsUpdate = true;
 		}
 
-		// Migration: Add Pi agent preset for existing users and make it default
-		const hasPiPreset = settings.aiPresets?.some(
-			(p: any) => p.id === "pi-agent" || p.provider === "pi"
-		);
-		if (settings.aiPresets && settings.aiPresets.length > 0 && !hasPiPreset) {
-			// Demote all existing presets from default
-			settings.aiPresets = settings.aiPresets.map((p: any) => ({ ...p, defaultPreset: false }));
-			// Add Pi as default at the front
-			settings.aiPresets = [DEFAULT_PI_PRESET as any, ...settings.aiPresets];
-			needsUpdate = true;
-		}
-
-		// Migration: Remove screenpipe-cloud presets (replaced by Pi agent)
+		// Migration: Remove legacy screenpipe-cloud presets without auto-replacing with Pi
 		if (settings.aiPresets?.some((p: any) => p.provider === "screenpipe-cloud")) {
 			const wasDefault = settings.aiPresets.some(
 				(p: any) => p.provider === "screenpipe-cloud" && p.defaultPreset
@@ -319,14 +296,12 @@ function createSettingsStore() {
 			settings.aiPresets = settings.aiPresets.filter(
 				(p: any) => p.provider !== "screenpipe-cloud"
 			);
-			// If a screenpipe-cloud preset was default, make Pi default
-			if (wasDefault) {
-				const piPreset = settings.aiPresets.find((p: any) => p.provider === "pi");
-				if (piPreset) (piPreset as any).defaultPreset = true;
-			}
-			// Ensure we still have at least one preset
-			if (settings.aiPresets.length === 0) {
-				settings.aiPresets = [DEFAULT_PI_PRESET as any];
+			// If a removed screenpipe-cloud preset was default, reassign default to the first remaining preset
+			if (wasDefault && settings.aiPresets.length > 0) {
+				const hasDefault = settings.aiPresets.some((p: any) => p.defaultPreset);
+				if (!hasDefault) {
+					(settings.aiPresets[0] as any).defaultPreset = true;
+				}
 			}
 			needsUpdate = true;
 		}

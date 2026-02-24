@@ -281,13 +281,6 @@ const AISection = ({
               defaultPreset: p.defaultPreset,
             } as AIPreset;
 
-            // If this is the default preset, update global settings too
-            if (p.defaultPreset) {
-              updateSettings({
-                aiPresets: updatedPresets,
-              });
-            }
-
             return updatedPreset;
           }
           return p;

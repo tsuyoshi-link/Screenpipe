@@ -553,6 +553,8 @@ export function StandaloneChat() {
   const piStartInFlightRef = useRef(false);
   const piRestartCountRef = useRef(0);
   const piStoppedIntentionallyRef = useRef(false);
+  const activePresetRef = useRef<AIPreset | undefined>(undefined);
+  const userTokenRef = useRef<string | null>(null);
   const piThinkingStartRef = useRef<number | null>(null);
 
   // Follow-up suggestions state (TikTok-style)
@@ -1130,8 +1132,17 @@ export function StandaloneChat() {
   };
 
   useEffect(() => {
-    const defaultPreset = settings.aiPresets?.find((p) => p.defaultPreset);
-    setActivePreset(defaultPreset || settings.aiPresets?.[0]);
+    setActivePreset((prev) => {
+      if (!settings.aiPresets?.length) return undefined;
+
+      if (prev?.id) {
+        const samePreset = settings.aiPresets.find((p) => p.id === prev.id);
+        if (samePreset) return samePreset;
+      }
+
+      const defaultPreset = settings.aiPresets.find((p) => p.defaultPreset);
+      return defaultPreset || settings.aiPresets[0];
+    });
   }, [settings.aiPresets]);
 
   const hasPresets = settings.aiPresets && settings.aiPresets.length > 0;
@@ -1176,15 +1187,27 @@ export function StandaloneChat() {
   // Pi project dir is managed Rust-side at boot
 
   // Build Pi provider config from active preset
-  const buildProviderConfig = useCallback(() => {
-    if (!activePreset) return null;
+  const buildProviderConfigFromPreset = useCallback((preset?: AIPreset | null) => {
+    if (!preset) return null;
     return {
-      provider: activePreset.provider,
-      url: activePreset.url || "",
-      model: activePreset.model || "",
-      apiKey: ("apiKey" in activePreset ? (activePreset.apiKey as string) : null) || null,
+      provider: preset.provider,
+      url: preset.url || "",
+      model: preset.model || "",
+      apiKey: ("apiKey" in preset ? (preset.apiKey as string) : null) || null,
     };
-  }, [activePreset?.provider, activePreset?.url, activePreset?.model, activePreset?.apiKey]);
+  }, []);
+
+  const buildProviderConfig = useCallback(() => {
+    return buildProviderConfigFromPreset(activePreset);
+  }, [activePreset, buildProviderConfigFromPreset]);
+
+  useEffect(() => {
+    activePresetRef.current = activePreset;
+  }, [activePreset]);
+
+  useEffect(() => {
+    userTokenRef.current = settings.user?.token ?? null;
+  }, [settings.user?.token]);
 
   // Check Pi status on mount — Pi is auto-started at app boot by Rust
   useEffect(() => {
@@ -1653,10 +1676,10 @@ export function StandaloneChat() {
           if (piRestartCountRef.current <= 5 && !piStartInFlightRef.current) {
             console.log("[Pi] Auto-restarting (attempt", piRestartCountRef.current, "/ 5)");
             try {
-              const providerConfig = buildProviderConfig();
+              const providerConfig = buildProviderConfigFromPreset(activePresetRef.current);
               const home = await homeDir();
               const dir = await join(home, ".screenpipe", "pi-chat");
-              const result = await commands.piStart(dir, settings.user?.token ?? null, providerConfig);
+              const result = await commands.piStart(dir, userTokenRef.current ?? null, providerConfig);
               if (result.status === "ok") {
                 setPiInfo(result.data);
                 if (result.data.running) piRestartCountRef.current = 0;
