@@ -110,6 +110,8 @@ static SKIP_APPS: Lazy<HashSet<&'static str>> = Lazy::new(|| {
         "Microsoft Store",
         "Search",
         "TaskBar",
+        "Windows Security",
+        "Windows Defender Firewall",
         // Screenpipe's own UI should never be captured
         "screenpipe",
         "screenpipe - Development",
@@ -181,6 +183,9 @@ static SKIP_TITLES: Lazy<HashSet<&'static str>> = Lazy::new(|| {
         "Action Center",
         "Task Bar",
         "Desktop",
+        "Windows Security",
+        "Windows セキュリティ",
+        "Windows Defender Firewall",
     ])
 });
 
@@ -839,6 +844,22 @@ fn get_all_windows() -> Result<Vec<WindowData>, Box<dyn Error>> {
                 }
             }
 
+            // Skip known-problematic/system windows before xcap capture_image() is called.
+            // This reduces exposure to native xcap crashes on Windows system dialogs.
+            let is_screenpipe_ui = app_name.to_lowercase().contains("screenpipe");
+            if is_screenpipe_ui
+                || SKIP_APPS.contains(app_name.as_str())
+                || app_name.is_empty()
+                || title.is_empty()
+                || SKIP_TITLES.contains(title.as_str())
+            {
+                debug!(
+                    "Skipping window before capture (pre-filter): app='{}' title='{}'",
+                    app_name, title
+                );
+                return None;
+            }
+
             let is_focused = window.is_focused().unwrap_or(false);
             let process_id = window.pid().map(|p| p as i32).unwrap_or(-1);
             let (window_x, window_y, window_width, window_height) = (
@@ -848,8 +869,8 @@ fn get_all_windows() -> Result<Vec<WindowData>, Box<dyn Error>> {
                 window.height().unwrap_or(0),
             );
 
-            match window.capture_image() {
-                Ok(buffer) => Some(WindowData {
+            match std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| window.capture_image())) {
+                Ok(Ok(buffer)) => Some(WindowData {
                     app_name,
                     title,
                     is_focused,
@@ -860,10 +881,17 @@ fn get_all_windows() -> Result<Vec<WindowData>, Box<dyn Error>> {
                     window_height,
                     image_buffer: buffer,
                 }),
-                Err(e) => {
+                Ok(Err(e)) => {
                     debug!(
                         "Failed to capture image for window {} ({}): {}",
                         app_name, title, e
+                    );
+                    None
+                }
+                Err(_) => {
+                    debug!(
+                        "xcap panicked while capturing window {} ({}) - skipping",
+                        app_name, title
                     );
                     None
                 }

@@ -791,7 +791,15 @@ pub async fn pi_start_inner(
     // callable `screenpipe-search` tool when only the skill file is present.
     let is_local_model = matches!(pi_provider.as_str(), "ollama" | "custom");
     if is_local_model {
-        let api_hint = concat!(
+        let screenpipe_skill_path = PathBuf::from(&project_dir)
+            .join(".pi")
+            .join("skills")
+            .join("screenpipe-search")
+            .join("SKILL.md")
+            .display()
+            .to_string();
+
+        let api_hint = format!(concat!(
             "You are a Screenpipe local activity assistant running on the user's PC. Screenpipe is already running locally on this computer.\n",
             "Your primary job is to search the user's Screenpipe memory and answer from retrieved results.\n",
             "CRITICAL TOOL RULES:\n",
@@ -806,6 +814,11 @@ pub async fn pi_start_inner(
             "8) Do NOT treat '/screenpipe-search' as a shell slash-command. Treat it as a request to use the screenpipe-search skill instructions.\n",
             "9) For memory-search requests, your FIRST meaningful action must be a tool step (read or bash). Do not answer with generic capability statements.\n",
             "10) Never answer with only a tool/skill name (e.g., 'screenpipe-search') or an empty response.\n",
+            "11) On Windows, never reconstruct or normalize skill file paths by hand. Copy the exact path string verbatim.\n",
+            "12) If a Windows path contains line-wrap artifacts (extra spaces, inserted hyphen, or broken segment like 'pi-\\\\chat'), repair it and retry once before giving up.\n",
+            "SCREENPIPE SKILL PATH (THIS MACHINE):\n",
+            "- Exact screenpipe-search skill file path: {screenpipe_skill_path}\n",
+            "- Prefer reading THIS exact file path for the skill instructions before running bash.\n",
             "SEARCH API REFERENCE:\n",
             "- Parameters: q (keywords), content_type (all|ocr|audio), limit (1-20), start_time (ISO 8601, REQUIRED), end_time, app_name, window_name\n",
             "- ALWAYS include start_time when querying recent history.\n",
@@ -827,8 +840,8 @@ pub async fn pi_start_inner(
             "- Treat this as a memory-search request requiring tool execution before answering\n",
             "- Use today's JST range (broad search first, no invented app/window filters)\n",
             "- If zero results, retry once with fewer filters, then report accurately"
-        );
-        cmd.args(["--append-system-prompt", api_hint]);
+        ), screenpipe_skill_path = screenpipe_skill_path);
+        cmd.args(["--append-system-prompt", api_hint.as_str()]);
     }
 
     // Bun 1.3+ fixed the readline pipe bug (bun 1.2 needed a PTY workaround).
