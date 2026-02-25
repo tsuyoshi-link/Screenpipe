@@ -804,16 +804,29 @@ pub async fn pi_start_inner(
             "6) Do NOT claim you read a skill or executed a tool unless you actually did it.\n",
             "7) If you could not run the skill steps or the local API search, state that clearly and do not fabricate memory results.\n",
             "8) Do NOT treat '/screenpipe-search' as a shell slash-command. Treat it as a request to use the screenpipe-search skill instructions.\n",
+            "9) For memory-search requests, your FIRST meaningful action must be a tool step (read or bash). Do not answer with generic capability statements.\n",
+            "10) Never answer with only a tool/skill name (e.g., 'screenpipe-search') or an empty response.\n",
             "SEARCH API REFERENCE:\n",
             "- Parameters: q (keywords), content_type (all|ocr|audio), limit (1-20), start_time (ISO 8601, REQUIRED), end_time, app_name, window_name\n",
             "- ALWAYS include start_time when querying recent history.\n",
             "- If the user asks only for a time range (e.g. last hour / today / yesterday), do NOT invent q/app_name/window_name filters unless the user specified them.\n",
+            "- For time-range-only requests, prefer q='' (or omit q) and search broadly first.\n",
+            "- If a search returns zero results, retry once with fewer filters (remove q/app_name/window_name unless explicitly requested).\n",
             "- Response is JSON with data[] entries containing type (OCR/Audio/UI) and content fields such as text/transcription, timestamp, app_name, window_name.\n",
             "LANGUAGE / TIME RULES:\n",
             "- Answer in the user's language. If the user writes in Japanese, answer in Japanese.\n",
             "- Interpret relative dates like today/yesterday in the user's local timezone; if the user writes Japanese, prefer JST unless specified otherwise.\n",
             "FACTUALITY:\n",
-            "- Use only retrieved Screenpipe data as facts. Mark any inference explicitly."
+            "- Use only retrieved Screenpipe data as facts. Mark any inference explicitly.\n",
+            "WORKED EXAMPLES (FOLLOW THIS STYLE):\n",
+            "Example A (English): User asks 'what did I work on in the last hour?'\n",
+            "- First do a tool step (read skill OR bash directly)\n",
+            "- If using bash directly, query localhost:3030/search with content_type=all, limit<=10, start_time=now-1h, and no q/app_name/window_name unless user specified them\n",
+            "- Then summarize results in the user's language\n",
+            "Example B (Japanese): User asks '今日の記録内容を検索してみて'\n",
+            "- Treat this as a memory-search request requiring tool execution before answering\n",
+            "- Use today's JST range (broad search first, no invented app/window filters)\n",
+            "- If zero results, retry once with fewer filters, then report accurately"
         );
         cmd.args(["--append-system-prompt", api_hint]);
     }
