@@ -193,7 +193,7 @@ Use the lightest level that proves the change.
   - If total CPU is too high, stop non-essential app processes first (`screenpipe-app` etc.).
   - `.cargo/config.toml` defaults to 16 jobs; explicit env override is mandatory when load control is required.
   - Raise priority/jobs only after user confirmation.
-- For long builds, preserve logs under `01_tickets/active/_tmp-*.log`.
+- For long builds, preserve logs under `01_tickets/artifacts/tickets/<ticket-id>/<run-ts>/` (do not write build logs to `01_tickets/active/`).
 
 ## Build-Time Reduction Rules (Mandatory)
 - Do not run `clean` unless there is a concrete cache-corruption reason.
