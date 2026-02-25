@@ -1879,6 +1879,89 @@ export function StandaloneChat() {
       return;
     }
 
+    // Local slash commands handled by Screenpipe UI (not forwarded as model prompts)
+    const trimmedInput = userMessage.trim();
+    const normalizedInput = trimmedInput.toLowerCase();
+    let requestedThinkingLevel: "off" | "low" | "medium" | "high" | null = null;
+    if (normalizedInput === "/set nothink") {
+      requestedThinkingLevel = "off";
+    } else {
+      const match = normalizedInput.match(/^\/set\s+(?:think|thinking)\s+(off|low|medium|high)$/);
+      if (match) {
+        requestedThinkingLevel = match[1] as "off" | "low" | "medium" | "high";
+      }
+    }
+
+    if (requestedThinkingLevel) {
+      const commandUserMessage: Message = {
+        id: Date.now().toString(),
+        role: "user",
+        content: userMessage,
+        ...(displayLabel ? { displayContent: displayLabel } : {}),
+        timestamp: Date.now(),
+      };
+      const assistantMessageId = (Date.now() + 1).toString();
+
+      // Clear follow-ups for command messages as well
+      setFollowUpSuggestions([]);
+      followUpFiredRef.current = false;
+      if (followUpAbortRef.current) {
+        followUpAbortRef.current.abort();
+        followUpAbortRef.current = null;
+      }
+      lastUserMessageRef.current = userMessage;
+
+      setMessages((prev) => [
+        ...prev,
+        commandUserMessage,
+        {
+          id: assistantMessageId,
+          role: "assistant",
+          content: `Thinking level set to ${requestedThinkingLevel}.`,
+          timestamp: Date.now(),
+        },
+      ]);
+      setInput("");
+
+      try {
+        const result = await commands.piSetThinkingLevel(requestedThinkingLevel);
+        if (result.status === "error") {
+          setMessages((prev) =>
+            prev.map((m) =>
+              m.id === assistantMessageId
+                ? { ...m, content: `Error: ${result.error}` }
+                : m
+            )
+          );
+          toast({
+            title: "Failed to set thinking level",
+            description: result.error,
+            variant: "destructive",
+          });
+        } else {
+          toast({
+            title: "Thinking level updated",
+            description: `Pi thinking level is now ${requestedThinkingLevel}.`,
+          });
+        }
+      } catch (error) {
+        const errorMsg = error instanceof Error ? error.message : "Unknown error";
+        setMessages((prev) =>
+          prev.map((m) =>
+            m.id === assistantMessageId
+              ? { ...m, content: `Error: ${errorMsg}` }
+              : m
+          )
+        );
+        toast({
+          title: "Failed to set thinking level",
+          description: errorMsg,
+          variant: "destructive",
+        });
+      }
+      return;
+    }
+
     const newUserMessage: Message = {
       id: Date.now().toString(),
       role: "user",

@@ -521,6 +521,17 @@ async piNewSession() : Promise<Result<null, string>> {
 }
 },
 /**
+ * Set Pi thinking level for the current session
+ */
+async piSetThinkingLevel(level: "off" | "low" | "medium" | "high") : Promise<Result<null, string>> {
+    try {
+    return { status: "ok", data: await TAURI_INVOKE("pi_set_thinking_level", { level }) };
+} catch (e) {
+    if(e instanceof Error) throw e;
+    else return { status: "error", error: e  as any };
+}
+},
+/**
  * Save obsidian settings to persistent store (called when settings change)
  */
 async obsidianSaveSettings(settings: ObsidianSyncSettings) : Promise<Result<null, string>> {

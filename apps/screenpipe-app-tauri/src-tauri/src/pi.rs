@@ -1100,6 +1100,37 @@ pub async fn pi_new_session(state: State<'_, PiState>) -> Result<(), String> {
     m.send_command(json!({"type": "new_session"}))
 }
 
+/// Set Pi thinking level for the current session (off/low/medium/high)
+#[tauri::command]
+#[specta::specta]
+pub async fn pi_set_thinking_level(
+    state: State<'_, PiState>,
+    level: String,
+) -> Result<(), String> {
+    let level = level.trim().to_lowercase();
+    match level.as_str() {
+        "off" | "low" | "medium" | "high" => {}
+        _ => {
+            return Err(format!(
+                "Invalid thinking level: {} (expected off/low/medium/high)",
+                level
+            ))
+        }
+    }
+
+    let mut manager = state.0.lock().await;
+    let m = manager.as_mut().ok_or("Pi not initialized")?;
+
+    if !m.is_running() {
+        return Err("Pi is not running".to_string());
+    }
+
+    m.send_command(json!({
+        "type": "set_thinking_level",
+        "level": level
+    }))
+}
+
 /// Check if pi is available
 #[tauri::command]
 #[specta::specta]

@@ -1170,6 +1170,7 @@ async fn main() {
                 pi::pi_prompt,
                 pi::pi_abort,
                 pi::pi_new_session,
+                pi::pi_set_thinking_level,
                 // Obsidian Sync commands
                 obsidian_sync::obsidian_save_settings,
                 obsidian_sync::obsidian_validate_vault,
@@ -1365,6 +1366,7 @@ async fn main() {
             pi::pi_prompt,
             pi::pi_abort,
             pi::pi_new_session,
+            pi::pi_set_thinking_level,
             // Obsidian Sync commands
             obsidian_sync::obsidian_save_settings,
             obsidian_sync::obsidian_validate_vault,
