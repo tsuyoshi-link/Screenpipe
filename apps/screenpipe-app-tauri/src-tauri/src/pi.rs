@@ -786,8 +786,9 @@ pub async fn pi_start_inner(
     cmd.current_dir(&project_dir)
         .args(["--mode", "rpc", "--provider", &pi_provider, "--model", &pi_model]);
 
-    // For local/small models, inject minimal screenpipe API context directly into the system prompt
-    // so they don't need to discover and read the skill file (which they often skip)
+    // For local/small models, inject Screenpipe memory-search guidance directly.
+    // Keep "skill" vs "tool" wording explicit to avoid models hallucinating a
+    // callable `screenpipe-search` tool when only the skill file is present.
     let is_local_model = matches!(pi_provider.as_str(), "ollama" | "custom");
     if is_local_model {
         let api_hint = concat!(
@@ -795,15 +796,18 @@ pub async fn pi_start_inner(
             "Your primary job is to search the user's Screenpipe memory and answer from retrieved results.\n",
             "CRITICAL TOOL RULES:\n",
             "1) For requests about activity/history/memory/logs (examples: today, yesterday, what I did, activity log, timeline, search), you MUST use Screenpipe search before answering.\n",
-            "2) Prefer the built-in screenpipe-search tool/skill when available.\n",
-            "3) If screenpipe-search is unavailable, use the local Screenpipe HTTP API instead of generic file tools:\n",
+            "2) screenpipe-search is primarily provided as a SKILL instruction file. Do NOT assume it is a callable tool unless it appears in the available tool list.\n",
+            "3) Preferred flow: read the screenpipe-search skill instructions, then execute the documented bash steps (curl localhost:3030/search) and summarize the results.\n",
+            "4) If the skill file cannot be read, use the local Screenpipe HTTP API directly (bash + curl), not generic local log files:\n",
             "curl \"http://localhost:3030/search?q=QUERY&content_type=all&limit=10&start_time=ISO8601\"\n",
-            "4) Do NOT ask for local file paths like /home/user/logs and do NOT suggest generic read/bash log-file workflows for Screenpipe memory questions.\n",
-            "5) Do NOT claim you executed a tool unless you actually executed it.\n",
-            "6) If you could not run screenpipe-search or the local API search, state that clearly and do not fabricate memory results.\n",
+            "5) Do NOT ask for local file paths like /home/user/logs for Screenpipe memory questions.\n",
+            "6) Do NOT claim you read a skill or executed a tool unless you actually did it.\n",
+            "7) If you could not run the skill steps or the local API search, state that clearly and do not fabricate memory results.\n",
+            "8) Do NOT treat '/screenpipe-search' as a shell slash-command. Treat it as a request to use the screenpipe-search skill instructions.\n",
             "SEARCH API REFERENCE:\n",
             "- Parameters: q (keywords), content_type (all|ocr|audio), limit (1-20), start_time (ISO 8601, REQUIRED), end_time, app_name, window_name\n",
             "- ALWAYS include start_time when querying recent history.\n",
+            "- If the user asks only for a time range (e.g. last hour / today / yesterday), do NOT invent q/app_name/window_name filters unless the user specified them.\n",
             "- Response is JSON with data[] entries containing type (OCR/Audio/UI) and content fields such as text/transcription, timestamp, app_name, window_name.\n",
             "LANGUAGE / TIME RULES:\n",
             "- Answer in the user's language. If the user writes in Japanese, answer in Japanese.\n",

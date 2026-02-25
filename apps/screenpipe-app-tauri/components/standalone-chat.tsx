@@ -2159,6 +2159,10 @@ export function StandaloneChat() {
           isMac && "pl-[72px]"
         )}
         onMouseDown={async (e) => {
+          const target = e.target as HTMLElement | null;
+          if (target?.closest("[data-no-drag='true']")) {
+            return;
+          }
           if (e.button === 0) {
             try {
               await getCurrentWindow().startDragging();
@@ -2180,8 +2184,12 @@ export function StandaloneChat() {
           <p className="text-[10px] text-muted-foreground font-mono uppercase tracking-wider">Screen Activity Assistant</p>
         </div>
         <Button
+          data-no-drag="true"
           variant={showHistory ? "secondary" : "ghost"}
           size="sm"
+          onMouseDown={(e) => {
+            e.stopPropagation();
+          }}
           onClick={async (e) => {
             e.stopPropagation();
             if (!showHistory) {
@@ -2197,8 +2205,12 @@ export function StandaloneChat() {
           <span className="hidden sm:inline">History</span>
         </Button>
         <Button
+          data-no-drag="true"
           variant="default"
           size="sm"
+          onMouseDown={(e) => {
+            e.stopPropagation();
+          }}
           onClick={(e) => {
             e.stopPropagation();
             startNewConversation();
